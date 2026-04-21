@@ -132,9 +132,9 @@ class Setup(commands.Cog):
 
     # ── /setup_business_channel ───────────────────────────────────────────────
 
-    @app_commands.command(name="setup_business_channel", description="Set the channel where business posts will be created.")
-    @app_commands.describe(channel="The channel where business posts will appear")
-    async def setup_business_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    @app_commands.command(name="setup_business_channel", description="Set the forum channel where business threads will be created.")
+    @app_commands.describe(channel="A Forum Channel — each approved business gets its own thread here")
+    async def setup_business_channel(self, interaction: discord.Interaction, channel: discord.ForumChannel):
         if not await admin_check(interaction):
             return
         await ensure_guild(interaction.guild_id)
@@ -144,8 +144,9 @@ class Setup(commands.Cog):
             channel.id, interaction.guild_id
         )
         embed = styled_embed(
-            "Business Channel Set",
-            f"New business posts will appear in {channel.mention}.",
+            "Business Forum Channel Set",
+            f"Approved businesses will get their own thread in {channel.mention}.\n\n"
+            f"Make sure this is a **Forum Channel** — each business will appear as a separate post.",
             color=SUCCESS
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
