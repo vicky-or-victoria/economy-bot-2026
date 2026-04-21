@@ -391,6 +391,113 @@ class BusinessApplicationModal(discord.ui.Modal, title="Business Application"):
                     pass
 
 
+# ── Profile handler ──────────────────────────────────────────────────────────
+
+async def handle_profile(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    pool = get_pool()
+    guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+    sym = guild_row["currency_symbol"]
+    name = guild_row["currency_name"]
+
+    # Wallet
+    from db.queries.wallets import get_or_create_wallet
+    wallet = await get_or_create_wallet(interaction.guild_id, interaction.user.id)
+    cash = float(wallet["cash_balance"])
+    digital = float(wallet["digital_balance"])
+
+    # XP / job
+    xp_row = await get_or_create_xp(interaction.guild_id, interaction.user.id)
+    xp = xp_row["xp"]
+    level = xp_to_level(xp)
+    job_key = xp_row["job"] if xp_row["job"] in JOBS else "unemployed"
+    job = JOBS[job_key]
+
+    # Next level XP needed
+    next_xp = None
+    for threshold in XP_LEVEL_THRESHOLDS:
+        if xp < threshold:
+            next_xp = threshold
+            break
+    xp_progress = f"{xp} / {next_xp} XP" if next_xp else f"{xp} XP (max level)"
+
+    # Businesses
+    from db.queries.businesses import get_businesses_by_owner
+    businesses = await get_businesses_by_owner(interaction.guild_id, interaction.user.id)
+    biz_count = len(businesses)
+    biz_revenue = sum(float(b["revenue"]) for b in businesses)
+    public_count = sum(1 for b in businesses if b["is_public"])
+
+    # Stock holdings value
+    from db.queries.stocks import get_holdings
+    holdings = await get_holdings(interaction.guild_id, interaction.user.id)
+    stock_value = sum(float(h["shares"]) * float(h["current_price"]) for h in holdings)
+
+    # Net worth = cash + digital + stock value + business revenue
+    net_worth = cash + digital + stock_value + biz_revenue
+
+    # Work cooldown status
+    from datetime import datetime, timezone
+    work_status = "Ready to work! ✅"
+    if xp_row["last_work"]:
+        last = xp_row["last_work"]
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 60
+        if elapsed < WORK_COOLDOWN_MINUTES:
+            remaining = int(WORK_COOLDOWN_MINUTES - elapsed)
+            work_status = f"On cooldown — {remaining}m remaining ⏳"
+
+    usd_rate = float(guild_row["usd_rate"])
+    net_worth_usd = net_worth / usd_rate if usd_rate else 0
+
+    embed = styled_embed(
+        f"📊 {interaction.user.display_name}'s Profile",
+        color=ACCENT
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.add_field(
+        name="💼 Career",
+        value=(
+            f"{job['emoji']} **{job['label']}**\n"
+            f"Level **{level}** · {xp_progress}\n"
+            f"{work_status}"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="💰 Wallet",
+        value=(
+            f"Cash: **{sym}{cash:,.2f}**\n"
+            f"Digital: **{sym}{digital:,.2f}**"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="📈 Investments",
+        value=(
+            f"Stocks: **{sym}{stock_value:,.2f}**\n"
+            f"Holdings: **{len(holdings)}** position(s)"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="🏢 Businesses",
+        value=(
+            f"Owned: **{biz_count}** · Public: **{public_count}**\n"
+            f"Total Revenue: **{sym}{biz_revenue:,.2f}**"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🏦 Net Worth",
+        value=f"**{sym}{net_worth:,.2f}** ≈ **${net_worth_usd:,.2f} USD**",
+        inline=False
+    )
+    embed.set_footer(text=f"Economy System  ·  {name} ({sym})")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ── Main player menu view ─────────────────────────────────────────────────────
 
 class PlayerMenuView(discord.ui.View):
@@ -443,6 +550,11 @@ class PlayerMenuView(discord.ui.View):
             ephemeral=True
         )
 
+    @discord.ui.button(label="📊 Profile", style=discord.ButtonStyle.secondary, custom_id="menu:profile")
+    async def profile_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ensure_guild(interaction.guild_id)
+        await handle_profile(interaction)
+
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
@@ -485,6 +597,7 @@ class Menu(commands.Cog):
         embed.add_field(name="🏢 Businesses", value="Check your businesses or apply to start a new one.", inline=False)
         embed.add_field(name="⚒️ Work", value=f"Work your current job to earn {sym} and gain XP.", inline=False)
         embed.add_field(name="🎯 Jobs", value="Browse and switch jobs based on your XP level.", inline=False)
+        embed.add_field(name="📊 Profile", value="View your net worth, XP, job, wallet, businesses and stock holdings.", inline=False)
 
         msg = await channel.send(embed=embed, view=PlayerMenuView())
         await pool.execute(
