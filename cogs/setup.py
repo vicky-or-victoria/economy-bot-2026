@@ -282,7 +282,7 @@ class Setup(commands.Cog):
 
             # ── Pending expansion proposals ──
             expansions = await pool.fetch(
-                """SELECT ep.*, b.name AS business_name
+                """SELECT ep.*, b.name AS business_name, b.industry AS business_industry
                    FROM expansion_proposals ep
                    JOIN businesses b ON b.id = ep.business_id
                    WHERE ep.guild_id = $1 AND ep.status = 'pending'
@@ -293,11 +293,12 @@ class Setup(commands.Cog):
             for exp in expansions:
                 try:
                     embed = styled_embed(
-                        f"🏗️ Expansion Proposal #{exp['id']}: {exp['title']}",
-                        f"**Business:** {exp['business_name']}\n"
-                        f"**Owner:** <@{exp['owner_id']}>\n\n"
-                        f"**Description:**\n{exp['description']}\n\n"
-                        f"**Estimated Revenue:** {sym}{exp['estimated_revenue']:,.2f}/day",
+                        f"🏗️ Expansion Proposal #{exp['id']}",
+                        f"**{exp['business_name']}** by <@{exp['owner_id']}>\n"
+                        f"**Industry:** {exp['business_industry']}\n\n"
+                        f"**Proposal:** {exp['title']}\n"
+                        f"**Est. Revenue Increase:** {sym}{exp['estimated_revenue']:,.2f}/day\n\n"
+                        f"{exp['description']}",
                         color=WARNING
                     )
                     await review_channel.send(content=role_mention, embed=embed, view=ExpansionReviewView(exp["id"]))
