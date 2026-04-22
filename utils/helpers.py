@@ -13,6 +13,11 @@ async def is_admin(interaction: discord.Interaction) -> bool:
     if interaction.user.guild_permissions.administrator:
         return True
     pool = get_pool()
+    # Ensure the guild row exists before querying it
+    await pool.execute(
+        "INSERT INTO guilds (guild_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        interaction.guild_id
+    )
     row = await pool.fetchrow(
         "SELECT admin_role_id FROM guilds WHERE guild_id = $1",
         interaction.guild_id
