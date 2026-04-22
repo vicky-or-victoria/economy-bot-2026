@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timezone
-from utils.helpers import admin_check, is_admin, ensure_guild, styled_embed, ACCENT, SUCCESS, DANGER, WARNING
+from utils.helpers import admin_check, is_admin, ensure_guild, styled_embed, styled_embed_formal, ACCENT, SUCCESS, DANGER, WARNING
 from utils.graphs import generate_business_chart
 from db.queries.businesses import (
     get_pending_applications, get_application, approve_application,
@@ -514,12 +514,12 @@ class ExpansionModal(discord.ui.Modal, title="Expansion Proposal"):
 
         await interaction.response.send_message(
             embed=styled_embed(
-                "Proposal Submitted ✅",
+                "Proposal Filed ✅",
                 f"Your expansion proposal **#{proposal_id}** for **{business['name']}** "
-                f"has been submitted for admin review.\n\n"
+                f"has been filed with G.R.E.T.A. and is pending review.\n\n"
                 f"**Title:** {self.title_input.value}\n"
                 f"**Est. Revenue Increase:** {sym}{est_rev:,.2f}/day\n\n"
-                f"You'll be notified of the decision.",
+                f"You will be notified of the decision.",
                 color=SUCCESS
             ),
             ephemeral=True
@@ -787,7 +787,7 @@ async def _build_business_embed(business: dict, guild_row: dict) -> discord.Embe
         f"**Listed Since:** <t:{int(business['created_at'].timestamp())}:D>",
         color=ACCENT
     )
-    embed.set_footer(text=f"Business ID: {business['id']}  |  Economy System")
+    embed.set_footer(text=f"Business ID: {business['id']}  ·  G.R.E.T.A. — Universalis Banking System")
     return embed
 
 
@@ -1220,10 +1220,10 @@ class ReviewView(discord.ui.View):
         try:
             member = interaction.guild.get_member(business["owner_id"])
             if member:
-                await member.send(embed=styled_embed(
-                    "Business Approved ✅",
-                    f"**{business['name']}** has been approved!\n\n"
-                    f"It starts **private**. Use **Set Salary** to configure your CEO salary, "
+                await member.send(embed=styled_embed_formal(
+                    "Application Approved ✅",
+                    f"G.R.E.T.A. is pleased to announce that **{business['name']}** has been approved.\n\n"
+                    f"Your business starts **private**. Use **Set Salary** to configure your CEO salary, "
                     f"then press **🏢 Work** daily to earn revenue into the company wallet, "
                     f"and **💰 Claim Salary** to pay yourself. Launch an IPO when you're ready to go public.",
                     color=SUCCESS
@@ -1243,9 +1243,9 @@ class ReviewView(discord.ui.View):
         try:
             member = interaction.guild.get_member(app["owner_id"])
             if member:
-                await member.send(embed=styled_embed(
-                    "Business Rejected",
-                    f"Your application for **{app['name']}** was not approved.",
+                await member.send(embed=styled_embed_formal(
+                    "Application Reviewed",
+                    f"After careful review, G.R.E.T.A. is unable to approve the application for **{app['name']}** at this time.",
                     color=DANGER
                 ))
         except Exception:
@@ -1372,18 +1372,18 @@ class ExpansionDecisionModal(discord.ui.Modal):
             if member:
                 if final_status == "approved":
                     msg_body = (
-                        f"Your expansion **{proposal_title}** was **approved**!\n\n"
-                        f"**Revenue Added:** {sym}{approved_rev:,.2f}\n\n"
-                        f"**Admin Note:** _{self.reason.value}_"
+                        f"G.R.E.T.A. has approved your expansion proposal **{proposal_title}**.\n\n"
+                        f"**Revenue Added:** {sym}{approved_rev:,.2f}/day\n\n"
+                        f"**G.R.E.T.A. Note:** _{self.reason.value}_"
                     )
                     color = SUCCESS
                 else:
                     msg_body = (
-                        f"Your expansion **{proposal_title}** was **denied**.\n\n"
-                        f"**Admin Note:** _{self.reason.value}_"
+                        f"After review, G.R.E.T.A. has declined your expansion proposal **{proposal_title}**.\n\n"
+                        f"**G.R.E.T.A. Note:** _{self.reason.value}_"
                     )
                     color = DANGER
-                await member.send(embed=styled_embed("Expansion Decision", msg_body, color=color))
+                await member.send(embed=styled_embed_formal("Expansion Decision", msg_body, color=color))
         except Exception:
             pass
 
