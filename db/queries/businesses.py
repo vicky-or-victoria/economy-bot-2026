@@ -86,7 +86,6 @@ async def claim_daily_salary(business_id: int) -> float:
     """
     pool = get_pool()
     biz = await pool.fetchrow("SELECT * FROM businesses WHERE id = $1", business_id)
-    # Revenue accrues to company wallet
     await pool.execute(
         """UPDATE businesses
            SET last_daily = NOW(),
@@ -118,6 +117,69 @@ async def deduct_company_wallet(business_id: int, amount: float) -> bool:
         amount, business_id
     )
     return True
+
+
+async def work_business(business_id: int) -> tuple[float, bool]:
+    """
+    Deposits the business's current daily revenue into the company wallet and marks last_work.
+    Returns (amount_or_remaining_hours, success).
+      - On success:  (revenue_deposited, True)
+      - On cooldown: (remaining_hours_float, False)
+      - No revenue:  (0.0, False)
+    Uses a 20-hour cooldown separate from the CEO salary claim.
+    """
+    from datetime import datetime, timezone
+    pool = get_pool()
+    biz = await pool.fetchrow("SELECT * FROM businesses WHERE id = $1", business_id)
+    if not biz:
+        return 0.0, False
+
+    daily_revenue = float(biz["revenue"])
+    if daily_revenue <= 0:
+        return 0.0, False
+
+    if biz["last_work"]:
+        last = biz["last_work"]
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+        if elapsed < 20:
+            remaining_hours = 20 - elapsed
+            return remaining_hours, False
+
+    await pool.execute(
+        """UPDATE businesses
+           SET last_work = NOW(),
+               company_wallet = company_wallet + $1
+           WHERE id = $2""",
+        daily_revenue, business_id
+    )
+    return daily_revenue, True
+
+
+async def delete_business(business_id: int) -> dict | None:
+    """
+    Deletes a business and returns its snapshot before deletion.
+    Also deletes associated stocks (stock_holdings cascade from stocks FK).
+    Expansion proposals cascade automatically via ON DELETE CASCADE.
+    """
+    pool = get_pool()
+    biz = await pool.fetchrow("SELECT * FROM businesses WHERE id = $1", business_id)
+    if not biz:
+        return None
+    # Remove associated stocks first so stock_holdings cascade properly
+    await pool.execute("DELETE FROM stocks WHERE business_id = $1", business_id)
+    await pool.execute("DELETE FROM businesses WHERE id = $1", business_id)
+    return dict(biz)
+
+
+async def get_businesses_by_guild(guild_id: int) -> list:
+    """Get all businesses in a guild (alias for get_all_businesses, kept for clarity)."""
+    pool = get_pool()
+    return await pool.fetch(
+        "SELECT * FROM businesses WHERE guild_id = $1 ORDER BY created_at",
+        guild_id
+    )
 
 
 # ── Expansion proposals ───────────────────────────────────────────────────────
