@@ -1283,7 +1283,7 @@ class ExpansionDecisionModal(discord.ui.Modal):
         max_length=500
     )
     revenue_override = discord.ui.TextInput(
-        label="Revenue Increase (leave blank to use estimate or 0 to deny)",
+        label="Revenue Increase (blank = estimate, 0 = deny)",
         placeholder="e.g. 300  (only used for approve/modify)",
         required=False,
         max_length=16
