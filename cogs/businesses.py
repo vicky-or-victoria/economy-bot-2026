@@ -9,7 +9,8 @@ from db.queries.businesses import (
     reject_application, get_business, update_business_message,
     set_business_public, set_ceo_salary, claim_daily_salary,
     deduct_company_wallet, create_expansion_proposal,
-    get_pending_expansions, get_expansion, resolve_expansion
+    get_pending_expansions, get_expansion, resolve_expansion,
+    work_business, delete_business, get_businesses_by_guild,
 )
 from db.queries.stocks import (
     create_stock, get_stock_by_ticker, get_stock_by_business,
@@ -35,22 +36,40 @@ def _tax(amount: float, rate_pct: float) -> tuple[float, float]:
     return round(amount - tax, 2), tax
 
 
+async def _delete_forum_thread(guild: discord.Guild, thread_id: int | None):
+    """Attempts to delete a forum thread by ID. Silently ignores errors."""
+    if not thread_id:
+        return
+    try:
+        thread = guild.get_channel(thread_id) or await guild.fetch_channel(thread_id)
+        if thread:
+            await thread.delete()
+    except Exception:
+        pass
+
+
 # ── Business post persistent view ─────────────────────────────────────────────
 
 class BusinessPostView(discord.ui.View):
     def __init__(self, business_id: int):
         super().__init__(timeout=None)
         self.business_id = business_id
-        self.daily_button.custom_id   = f"biz:daily:{business_id}"
-        self.stats_button.custom_id   = f"biz:stats:{business_id}"
-        self.ipo_button.custom_id     = f"biz:ipo:{business_id}"
-        self.salary_button.custom_id  = f"biz:salary:{business_id}"
-        self.expand_button.custom_id  = f"biz:expand:{business_id}"
+        self.daily_button.custom_id    = f"biz:daily:{business_id}"
+        self.work_button.custom_id     = f"biz:work:{business_id}"
+        self.stats_button.custom_id    = f"biz:stats:{business_id}"
+        self.ipo_button.custom_id      = f"biz:ipo:{business_id}"
+        self.salary_button.custom_id   = f"biz:salary:{business_id}"
+        self.expand_button.custom_id   = f"biz:expand:{business_id}"
         self.dividend_button.custom_id = f"biz:dividend:{business_id}"
+        self.shutdown_button.custom_id = f"biz:shutdown:{business_id}"
 
     @discord.ui.button(label="💰 Claim Salary", style=discord.ButtonStyle.success, custom_id="biz:daily:0")
     async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_daily(interaction, self.business_id)
+
+    @discord.ui.button(label="🏢 Work", style=discord.ButtonStyle.primary, custom_id="biz:work:0")
+    async def work_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_work(interaction, self.business_id)
 
     @discord.ui.button(label="📊 Stats", style=discord.ButtonStyle.secondary, custom_id="biz:stats:0")
     async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -71,6 +90,54 @@ class BusinessPostView(discord.ui.View):
     @discord.ui.button(label="💸 Pay Dividends", style=discord.ButtonStyle.danger, custom_id="biz:dividend:0")
     async def dividend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_dividend(interaction, self.business_id)
+
+    @discord.ui.button(label="🔴 Shut Down", style=discord.ButtonStyle.danger, custom_id="biz:shutdown:0")
+    async def shutdown_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_shutdown(interaction, self.business_id)
+
+
+# ── Work (deposit daily revenue into company wallet) ──────────────────────────
+
+async def handle_work(interaction: discord.Interaction, business_id: int):
+    business = await get_business(business_id)
+    if not business or business["owner_id"] != interaction.user.id:
+        await interaction.response.send_message("This isn't your business.", ephemeral=True)
+        return
+
+    pool = get_pool()
+    guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+    sym = guild_row["currency_symbol"]
+
+    if float(business["revenue"]) <= 0:
+        await interaction.response.send_message(
+            "Your business has **no revenue** yet. Grow it first via the **🏗️ Expand** button!",
+            ephemeral=True
+        )
+        return
+
+    result, success = await work_business(business_id)
+
+    if not success:
+        remaining = result  # hours remaining
+        h, m = int(remaining), int((remaining % 1) * 60)
+        embed = styled_embed(
+            "Business Already Worked",
+            f"Your business already generated revenue today.\nCome back in **{h}h {m}m**.",
+            color=WARNING
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    earned = result
+    embed = styled_embed(
+        "🏢 Revenue Collected",
+        f"Your business worked and earned **{sym}{earned:,.2f}** in revenue!\n\n"
+        f"This amount has been deposited into the **Company Wallet**.\n"
+        f"Use **💰 Claim Salary** to pay yourself from the company wallet.\n\n"
+        f"Come back in **{DAILY_COOLDOWN_HOURS} hours** to work again.",
+        color=SUCCESS
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ── Daily salary claim ────────────────────────────────────────────────────────
@@ -110,16 +177,14 @@ async def handle_daily(interaction: discord.Interaction, business_id: int):
     salary = float(business["ceo_salary"])
     net, tax = _tax(salary, tax_rate)
 
-    # Revenue accrues to company wallet first, then CEO pulls salary from it
     ok = await deduct_company_wallet(business_id, salary)
     if not ok:
-        # Company wallet doesn't have enough — still log the daily but pay from company wallet balance
         biz = await get_business(business_id)
         available = float(biz["company_wallet"])
         if available <= 0:
             await interaction.response.send_message(
                 f"Your company wallet is empty (**{sym}0.00**). "
-                f"Revenue must accumulate before you can claim your salary.",
+                f"Use the **🏢 Work** button to deposit today's revenue first.",
                 ephemeral=True
             )
             return
@@ -127,7 +192,6 @@ async def handle_daily(interaction: discord.Interaction, business_id: int):
         net, tax = _tax(salary, tax_rate)
         await deduct_company_wallet(business_id, salary)
 
-    # Mark daily claimed and add revenue to company
     await pool.execute(
         "UPDATE businesses SET last_daily = NOW(), revenue = revenue + $1 WHERE id = $2",
         salary, business_id
@@ -166,7 +230,7 @@ async def handle_set_salary(interaction: discord.Interaction, business_id: int):
         f"**Total Company Revenue:** {sym}{daily_revenue:,.2f}\n"
         f"**Max Allowed ({max_pct:.0f}% of revenue):** {sym}{max_salary:,.2f}/day\n\n"
         f"Your salary is deducted from the company wallet each time you claim it. "
-        f"The company wallet earns revenue through work and expansion approvals.",
+        f"The company wallet earns revenue when you press **🏢 Work**.",
         color=ACCENT
     )
     await interaction.response.send_message(
@@ -469,7 +533,6 @@ class ExpansionModal(discord.ui.Modal, title="Expansion Proposal"):
             ephemeral=True
         )
 
-        # Notify admins
         if guild_row["admin_role_id"]:
             role = interaction.guild.get_role(guild_row["admin_role_id"])
             if role and interaction.channel:
@@ -485,6 +548,67 @@ class ExpansionModal(discord.ui.Modal, title="Expansion Proposal"):
                     await interaction.channel.send(content=role.mention, embed=notify)
                 except Exception:
                     pass
+
+
+# ── Shutdown (player self-delete) ─────────────────────────────────────────────
+
+async def handle_shutdown(interaction: discord.Interaction, business_id: int):
+    business = await get_business(business_id)
+    if not business or business["owner_id"] != interaction.user.id:
+        await interaction.response.send_message("This isn't your business.", ephemeral=True)
+        return
+
+    embed = styled_embed(
+        "⚠️ Shut Down Business?",
+        f"Are you sure you want to **permanently shut down** `{business['name']}`?\n\n"
+        f"This will:\n"
+        f"• Delete the business and **all its data**\n"
+        f"• Remove the forum post\n"
+        f"• Delist any associated stock\n\n"
+        f"**This action cannot be undone.**",
+        color=DANGER
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        view=ShutdownConfirmView(business_id, business["name"]),
+        ephemeral=True
+    )
+
+
+class ShutdownConfirmView(discord.ui.View):
+    def __init__(self, business_id: int, business_name: str):
+        super().__init__(timeout=60)
+        self.business_id = business_id
+        self.business_name = business_name
+
+    @discord.ui.button(label="✅ Yes, Shut Down", style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        business = await get_business(self.business_id)
+        if not business or business["owner_id"] != interaction.user.id:
+            await interaction.response.edit_message(
+                embed=styled_embed("Error", "Could not verify ownership.", color=DANGER), view=None
+            )
+            return
+
+        thread_id = business.get("post_thread_id")
+        await delete_business(self.business_id)
+        await _delete_forum_thread(interaction.guild, thread_id)
+
+        await interaction.response.edit_message(
+            embed=styled_embed(
+                "Business Shut Down",
+                f"**{self.business_name}** has been permanently shut down and removed.",
+                color=DANGER
+            ),
+            view=None
+        )
+
+    @discord.ui.button(label="✖ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=styled_embed("Cancelled", "Shutdown cancelled. Your business is safe.", color=SUCCESS),
+            view=None
+        )
 
 
 # ── Dividends ─────────────────────────────────────────────────────────────────
@@ -608,7 +732,6 @@ class DividendModal(discord.ui.Modal, title="Pay Dividends"):
             total_paid += net
             paid_count += 1
 
-            # Try to DM each shareholder
             try:
                 guild = interaction.guild
                 member = guild.get_member(holder["user_id"])
@@ -792,6 +915,75 @@ class Businesses(commands.Cog):
             ephemeral=True
         )
 
+    # ── Admin: delete businesses ──────────────────────────────────────────────
+
+    @app_commands.command(
+        name="delete_business",
+        description="[Admin] Delete one, several, or all businesses in this server."
+    )
+    @app_commands.describe(
+        business_id="ID of a specific business to delete (leave blank with delete_all=True to wipe all)",
+        delete_all="If True, deletes ALL businesses in this server. Requires confirmation.",
+    )
+    async def delete_business_cmd(
+        self,
+        interaction: discord.Interaction,
+        business_id: int = None,
+        delete_all: bool = False,
+    ):
+        if not await admin_check(interaction):
+            return
+
+        if not business_id and not delete_all:
+            await interaction.response.send_message(
+                "Provide a `business_id` to delete a specific business, "
+                "or set `delete_all:True` to delete every business in this server.",
+                ephemeral=True
+            )
+            return
+
+        if delete_all:
+            businesses = await get_businesses_by_guild(interaction.guild_id)
+            if not businesses:
+                await interaction.response.send_message("No businesses found in this server.", ephemeral=True)
+                return
+            count = len(businesses)
+            embed = styled_embed(
+                "⚠️ Delete ALL Businesses?",
+                f"This will permanently delete **{count} business(es)** in this server, "
+                f"along with their forum posts, stocks, and expansion history.\n\n"
+                f"**This cannot be undone.**",
+                color=DANGER
+            )
+            await interaction.response.send_message(
+                embed=embed,
+                view=AdminDeleteAllView(businesses, interaction.guild),
+                ephemeral=True
+            )
+            return
+
+        # Single business delete
+        business = await get_business(business_id)
+        if not business or business["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message(
+                f"Business `#{business_id}` not found in this server.", ephemeral=True
+            )
+            return
+
+        embed = styled_embed(
+            f"⚠️ Delete Business #{business_id}?",
+            f"**{business['name']}** (owned by <@{business['owner_id']}>)\n\n"
+            f"This will permanently delete the business, its forum post, "
+            f"associated stock, and expansion history.\n\n"
+            f"**This cannot be undone.**",
+            color=DANGER
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=AdminDeleteSingleView(business_id, business["name"], interaction.guild),
+            ephemeral=True
+        )
+
     # ── Admin: tax & salary config ────────────────────────────────────────────
 
     @app_commands.command(name="set_tax_rates", description="Configure tax rates for work, salary, stocks, and dividends.")
@@ -883,6 +1075,79 @@ class Businesses(commands.Cog):
         self.bot.add_view(view)
 
 
+# ── Admin delete views ────────────────────────────────────────────────────────
+
+class AdminDeleteSingleView(discord.ui.View):
+    def __init__(self, business_id: int, business_name: str, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.business_id = business_id
+        self.business_name = business_name
+        self.guild = guild
+
+    @discord.ui.button(label="✅ Confirm Delete", style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        biz = await get_business(self.business_id)
+        if not biz:
+            await interaction.response.edit_message(
+                embed=styled_embed("Already Gone", "Business not found — it may have already been deleted.", color=WARNING),
+                view=None
+            )
+            return
+        thread_id = biz.get("post_thread_id")
+        await delete_business(self.business_id)
+        await _delete_forum_thread(self.guild, thread_id)
+        await interaction.response.edit_message(
+            embed=styled_embed(
+                "Business Deleted",
+                f"**{self.business_name}** has been permanently deleted.",
+                color=SUCCESS
+            ),
+            view=None
+        )
+
+    @discord.ui.button(label="✖ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=styled_embed("Cancelled", "No businesses were deleted.", color=WARNING),
+            view=None
+        )
+
+
+class AdminDeleteAllView(discord.ui.View):
+    def __init__(self, businesses: list, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.businesses = businesses
+        self.guild = guild
+
+    @discord.ui.button(label="✅ Yes, Delete All", style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        deleted = 0
+        for biz in self.businesses:
+            biz_dict = dict(biz)
+            thread_id = biz_dict.get("post_thread_id")
+            result = await delete_business(biz_dict["id"])
+            if result:
+                deleted += 1
+                await _delete_forum_thread(self.guild, thread_id)
+
+        await interaction.followup.send(
+            embed=styled_embed(
+                "All Businesses Deleted",
+                f"Successfully deleted **{deleted}** business(es) and their forum posts.",
+                color=SUCCESS
+            ),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="✖ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=styled_embed("Cancelled", "No businesses were deleted.", color=WARNING),
+            view=None
+        )
+
+
 # ── Review views ──────────────────────────────────────────────────────────────
 
 class ReviewView(discord.ui.View):
@@ -919,7 +1184,8 @@ class ReviewView(discord.ui.View):
                     "Business Approved ✅",
                     f"**{business['name']}** has been approved!\n\n"
                     f"It starts **private**. Use **Set Salary** to configure your CEO salary, "
-                    f"then **Claim Salary** daily. Launch an IPO when you're ready to go public.",
+                    f"then press **🏢 Work** daily to earn revenue into the company wallet, "
+                    f"and **💰 Claim Salary** to pay yourself. Launch an IPO when you're ready to go public.",
                     color=SUCCESS
                 ))
         except Exception:
@@ -1018,7 +1284,6 @@ class ExpansionDecisionModal(discord.ui.Modal, title="Expansion Decision"):
         guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
         sym = guild_row["currency_symbol"]
 
-        # Notify owner
         try:
             member = interaction.guild.get_member(self.owner_id)
             if member:
