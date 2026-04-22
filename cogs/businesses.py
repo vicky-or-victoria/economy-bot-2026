@@ -1225,7 +1225,6 @@ class ReviewView(discord.ui.View):
 class ExpansionReviewView(discord.ui.View):
     def __init__(self, proposal_id: int, estimated_revenue: float, owner_id: int):
         super().__init__(timeout=180)
-        super().__init__(title="Expansion Decision")
         self.proposal_id = proposal_id
         self.estimated_revenue = estimated_revenue
         self.owner_id = owner_id
