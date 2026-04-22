@@ -380,20 +380,20 @@ class BusinessApplicationModal(discord.ui.Modal, title="Business Application"):
         guild_row = await pool.fetchrow(
             "SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id
         )
-        if guild_row and guild_row["admin_role_id"]:
-            role = interaction.guild.get_role(guild_row["admin_role_id"])
-            if role:
+        if guild_row and guild_row.get("review_channel_id"):
+            review_channel = interaction.guild.get_channel(guild_row["review_channel_id"])
+            if review_channel:
                 try:
-                    channel = interaction.channel
+                    from cogs.businesses import ReviewView
+                    role_mention = f"<@&{guild_row['admin_role_id']}>" if guild_row.get("admin_role_id") else None
                     notify = styled_embed(
-                        "New Business Application",
-                        f"**{self.name.value}** by {interaction.user.mention}\n"
-                        f"Industry: {self.industry.value}\n"
-                        f"ID: `#{app_id}`\n\n"
-                        f"Use `/review_application {app_id}` to approve or reject.",
+                        f"📋 Business Application #{app_id}",
+                        f"**{self.name.value}** by <@{interaction.user.id}>\n"
+                        f"**Industry:** {self.industry.value}\n\n"
+                        f"{self.description.value}",
                         color=WARNING
                     )
-                    await channel.send(content=role.mention, embed=notify)
+                    await review_channel.send(content=role_mention, embed=notify, view=ReviewView(app_id, interaction.client))
                 except Exception:
                     pass
 
