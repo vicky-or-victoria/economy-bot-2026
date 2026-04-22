@@ -138,6 +138,7 @@ async def handle_work(interaction: discord.Interaction, business_id: int):
         color=SUCCESS
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    await _refresh_business_post(interaction.guild, business_id)
 
 
 # ── Daily salary claim ────────────────────────────────────────────────────────
@@ -207,6 +208,7 @@ async def handle_daily(interaction: discord.Interaction, business_id: int):
         color=SUCCESS
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    await _refresh_business_post(interaction.guild, business_id)
 
 
 # ── Set salary ────────────────────────────────────────────────────────────────
@@ -282,6 +284,7 @@ class SalaryModal(discord.ui.Modal, title="Set CEO Salary"):
         embed = styled_embed("Salary Updated",
             f"CEO salary set to **{self.sym}{val:,.2f}/day**.", color=SUCCESS)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _refresh_business_post(interaction.guild, self.business_id)
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
@@ -412,24 +415,13 @@ class IPOModal(discord.ui.Modal, title="Launch IPO"):
                     color=SUCCESS
                 ))
 
-        business = await get_business(self.business_id)
-        if business and business["post_thread_id"]:
-            try:
-                thread = interaction.guild.get_channel(business["post_thread_id"]) or \
-                         await interaction.guild.fetch_channel(business["post_thread_id"])
-                if thread:
-                    updated_embed = await _build_business_embed(business, guild_row)
-                    async for msg in thread.history(limit=1, oldest_first=True):
-                        await msg.edit(embed=updated_embed)
-            except Exception:
-                pass
-
         await interaction.followup.send(embed=styled_embed(
             "IPO Launched! 🎉",
             f"**{self.business_name}** is now publicly traded as `{ticker}`.\n"
             f"IPO price: {sym}{price:,.4f}",
             color=SUCCESS
         ), ephemeral=True)
+        await _refresh_business_post(interaction.guild, self.business_id)
 
 
 # ── Expansion ─────────────────────────────────────────────────────────────────
@@ -763,6 +755,7 @@ class DividendModal(discord.ui.Modal, title="Pay Dividends"):
             f"All shareholders have been notified via DM.",
             color=SUCCESS
         ), ephemeral=True)
+        await _refresh_business_post(interaction.guild, self.business_id)
 
 
 # ── Embed builder ─────────────────────────────────────────────────────────────
@@ -790,6 +783,40 @@ async def _build_business_embed(business: dict, guild_row: dict) -> discord.Embe
     )
     embed.set_footer(text=f"Business ID: {business['id']}  |  Economy System")
     return embed
+
+
+async def _refresh_business_post(guild: discord.Guild, business_id: int):
+    """Re-fetch the business and edit the original forum post embed with fresh data."""
+    try:
+        pool = get_pool()
+        business = await get_business(business_id)
+        if not business:
+            return
+        if not business.get("post_thread_id") and not business.get("post_message_id"):
+            return
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", guild.id)
+        if not guild_row:
+            return
+        embed = await _build_business_embed(business, guild_row)
+
+        thread_id = business.get("post_thread_id")
+        message_id = business.get("post_message_id")
+
+        if thread_id:
+            thread = guild.get_channel(thread_id) or await guild.fetch_channel(thread_id)
+            if thread and message_id:
+                msg = await thread.fetch_message(message_id)
+                await msg.edit(embed=embed)
+        elif message_id:
+            # Plain channel message (non-forum setup)
+            channel_id = guild_row.get("business_channel_id")
+            if channel_id:
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    msg = await channel.fetch_message(message_id)
+                    await msg.edit(embed=embed)
+    except Exception:
+        pass  # Never crash the user-facing flow over a refresh failure
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -1363,6 +1390,14 @@ class ExpansionDecisionModal(discord.ui.Modal):
             embed=styled_embed("Decision Recorded", f"Proposal #{self.proposal_id} {result_text}.", color=SUCCESS),
             ephemeral=True
         )
+
+        # If approved, revenue changed — refresh the business post
+        if final_status == "approved":
+            proposal_row = await pool.fetchrow(
+                "SELECT business_id FROM expansion_proposals WHERE id = $1", self.proposal_id
+            )
+            if proposal_row:
+                await _refresh_business_post(interaction.guild, proposal_row["business_id"])
 
 
 async def setup(bot: commands.Bot):
