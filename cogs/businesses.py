@@ -914,7 +914,7 @@ class Businesses(commands.Cog):
                     f"**Estimated Revenue:** {sym}{proposal['estimated_revenue']:,.2f}/day",
                     color=WARNING
                 ),
-                view=ExpansionReviewView(proposal_id, float(proposal["estimated_revenue"]), proposal["owner_id"]),
+                view=ExpansionReviewView(proposal_id),
                 ephemeral=True
             )
         except Exception as e:
@@ -1223,28 +1223,55 @@ class ReviewView(discord.ui.View):
 
 
 class ExpansionReviewView(discord.ui.View):
-    def __init__(self, proposal_id: int, estimated_revenue: float, owner_id: int):
-        super().__init__(timeout=180)
-        self.proposal_id = proposal_id
-        self.estimated_revenue = estimated_revenue
-        self.owner_id = owner_id
+    def __init__(self, proposal_id: int):
+        super().__init__(timeout=300)
+        # Encode proposal_id into each button custom_id so no state lives on the view
+        self.approve_btn.custom_id  = f"exprev:approve:{proposal_id}"
+        self.modify_btn.custom_id   = f"exprev:modify:{proposal_id}"
+        self.deny_btn.custom_id     = f"exprev:deny:{proposal_id}"
 
-    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success)
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        import traceback
+        traceback.print_exc()
+        try:
+            await interaction.response.send_message(f"Button error: `{error}`", ephemeral=True)
+        except Exception:
+            try:
+                await interaction.followup.send(f"Button error: `{error}`", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id="exprev:approve:0")
     async def approve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        proposal_id = int(button.custom_id.split(":")[2])
+        proposal = await get_expansion(proposal_id)
+        if not proposal:
+            await interaction.response.send_message("Proposal not found.", ephemeral=True)
+            return
         await interaction.response.send_modal(
-            ExpansionDecisionModal(self.proposal_id, "approved", self.estimated_revenue, self.owner_id)
+            ExpansionDecisionModal(proposal_id, "approved", float(proposal["estimated_revenue"]), proposal["owner_id"])
         )
 
-    @discord.ui.button(label="✏️ Modify & Approve", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="✏️ Modify & Approve", style=discord.ButtonStyle.primary, custom_id="exprev:modify:0")
     async def modify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        proposal_id = int(button.custom_id.split(":")[2])
+        proposal = await get_expansion(proposal_id)
+        if not proposal:
+            await interaction.response.send_message("Proposal not found.", ephemeral=True)
+            return
         await interaction.response.send_modal(
-            ExpansionDecisionModal(self.proposal_id, "modified", self.estimated_revenue, self.owner_id)
+            ExpansionDecisionModal(proposal_id, "modified", float(proposal["estimated_revenue"]), proposal["owner_id"])
         )
 
-    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="exprev:deny:0")
     async def deny_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        proposal_id = int(button.custom_id.split(":")[2])
+        proposal = await get_expansion(proposal_id)
+        if not proposal:
+            await interaction.response.send_message("Proposal not found.", ephemeral=True)
+            return
         await interaction.response.send_modal(
-            ExpansionDecisionModal(self.proposal_id, "denied", self.estimated_revenue, self.owner_id)
+            ExpansionDecisionModal(proposal_id, "denied", float(proposal["estimated_revenue"]), proposal["owner_id"])
         )
 
 
