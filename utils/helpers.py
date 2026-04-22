@@ -53,12 +53,23 @@ async def get_guild(guild_id: int):
 
 # ── Embed builder ─────────────────────────────────────────────────────────────
 
-def styled_embed(title: str, description: str = "", color: int = 0x1a1a2e) -> discord.Embed:
+GRETA_NAME    = "G.R.E.T.A."
+GRETA_FULL    = "God. Reliant. Ethical. Trust. & Assurance."
+GRETA_SERVER  = "Universalis"
+GRETA_FOOTER  = f"{GRETA_NAME} — {GRETA_SERVER} Banking System"
+
+def styled_embed(title: str, description: str = "", color: int = 0x1C1209) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(text="Economy System")
+    embed.set_footer(text=GRETA_FOOTER)
     return embed
 
-ACCENT = 0x00d4aa   # teal accent
-DANGER = 0xe63946   # red
-WARNING = 0xf4a261  # orange
-SUCCESS = 0x2a9d8f  # green
+def styled_embed_formal(title: str, description: str = "", color: int = 0x1C1209) -> discord.Embed:
+    """For high-stakes decisions (approvals, rejections, major notices) — includes the full motto."""
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_footer(text=f"{GRETA_FOOTER}  ·  {GRETA_FULL}")
+    return embed
+
+ACCENT  = 0xC9A84C  # warm gold
+DANGER  = 0x8B1A1A  # deep crimson
+WARNING = 0xD4A017  # deep gold-amber
+SUCCESS = 0x4A7C59  # forest green
