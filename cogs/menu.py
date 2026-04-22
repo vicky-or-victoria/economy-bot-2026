@@ -139,7 +139,11 @@ async def handle_work(interaction: discord.Interaction):
     reward = job["reward"]
     xp_gain = job["xp_gain"]
 
-    await add_cash(interaction.guild_id, interaction.user.id, reward)
+    tax_rate = float(guild_row.get("tax_rate_work", 10.0))
+    tax = round(reward * tax_rate / 100, 2)
+    net = round(reward - tax, 2)
+
+    await add_cash(interaction.guild_id, interaction.user.id, net)
     new_xp = xp_row["xp"] + xp_gain
     await pool.execute(
         "UPDATE user_experience SET xp = $1, last_work = NOW() WHERE guild_id = $2 AND user_id = $3",
@@ -150,8 +154,11 @@ async def handle_work(interaction: discord.Interaction):
     level = xp_to_level(new_xp)
     embed = styled_embed(
         f"{job['emoji']} Work Complete",
-        f"You worked as a **{job['label']}** and earned **{sym}{reward:,.2f}**.\n"
-        f"XP: **{new_xp}** (+{xp_gain})  |  Level **{level}**\n\n"
+        f"You worked as a **{job['label']}**\n"
+        f"Gross Pay: **{sym}{reward:,.2f}**\n"
+        f"Tax ({tax_rate:.0f}%): **-{sym}{tax:,.2f}**\n"
+        f"**Net to Wallet: {sym}{net:,.2f}**\n\n"
+        f"XP: **{new_xp}** (+{xp_gain})  |  Level **{level}**\n"
         f"Next shift available in {WORK_COOLDOWN_MINUTES} minutes.",
         color=SUCCESS
     )
