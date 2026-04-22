@@ -1278,26 +1278,31 @@ class ExpansionDecisionModal(discord.ui.Modal, title="Expansion Decision"):
                 approved_rev = self.estimated_revenue
 
         final_status = "approved" if self.decision != "denied" else "denied"
+
+        # Fetch proposal title BEFORE resolve (the JOIN may break after cascade deletes)
+        pool = get_pool()
+        proposal = await pool.fetchrow("SELECT title FROM expansion_proposals WHERE id = $1", self.proposal_id)
+        proposal_title = proposal["title"] if proposal else f"#{self.proposal_id}"
+
         await resolve_expansion(self.proposal_id, final_status, self.reason.value, approved_rev)
 
-        pool = get_pool()
         guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
         sym = guild_row["currency_symbol"]
 
+        # DM the business owner
         try:
             member = interaction.guild.get_member(self.owner_id)
             if member:
-                proposal = await get_expansion(self.proposal_id)
                 if final_status == "approved":
                     msg_body = (
-                        f"Your expansion **{proposal['title']}** was **approved**!\n\n"
+                        f"Your expansion **{proposal_title}** was **approved**!\n\n"
                         f"**Revenue Added:** {sym}{approved_rev:,.2f}\n\n"
                         f"**Admin Note:** _{self.reason.value}_"
                     )
                     color = SUCCESS
                 else:
                     msg_body = (
-                        f"Your expansion **{proposal['title']}** was **denied**.\n\n"
+                        f"Your expansion **{proposal_title}** was **denied**.\n\n"
                         f"**Admin Note:** _{self.reason.value}_"
                     )
                     color = DANGER
@@ -1305,7 +1310,11 @@ class ExpansionDecisionModal(discord.ui.Modal, title="Expansion Decision"):
         except Exception:
             pass
 
-        result_text = f"approved (+{sym}{approved_rev:,.2f})" if final_status == "approved" else "denied"
+        if final_status == "approved":
+            result_text = f"approved (+{sym}{approved_rev:,.2f})"
+        else:
+            result_text = "denied"
+
         await interaction.followup.send(
             embed=styled_embed("Decision Recorded", f"Proposal #{self.proposal_id} {result_text}.", color=SUCCESS),
             ephemeral=True
