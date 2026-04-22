@@ -85,7 +85,7 @@ class BuyStockModal(discord.ui.Modal, title="Buy Stock"):
             "UPDATE wallets SET digital_balance = digital_balance - $1 WHERE guild_id = $2 AND user_id = $3",
             total_cost, interaction.guild_id, interaction.user.id
         )
-        await buy_stock(interaction.guild_id, interaction.user.id, stock["id"], num_shares)
+        await buy_stock(interaction.guild_id, interaction.user.id, stock["id"], num_shares, float(stock["current_price"]))
         sym = guild_row["currency_symbol"]
         embed = styled_embed("Purchase Successful",
             f"Bought **{num_shares} {stock['ticker']}** shares\n"
@@ -117,7 +117,7 @@ class SellStockModal(discord.ui.Modal, title="Sell Stock"):
             await interaction.followup.send("Invalid share amount.", ephemeral=True)
             return
 
-        ok = await sell_stock(interaction.guild_id, interaction.user.id, stock["id"], num_shares)
+        ok, avg_buy_price, _ = await sell_stock(interaction.guild_id, interaction.user.id, stock["id"], num_shares)
         if not ok:
             await interaction.followup.send(
                 embed=styled_embed("Insufficient Shares", "You don't have enough shares to sell.", color=DANGER),
@@ -125,16 +125,29 @@ class SellStockModal(discord.ui.Modal, title="Sell Stock"):
             )
             return
 
-        total_value = float(stock["current_price"]) * num_shares
+        sell_price = float(stock["current_price"])
+        total_value = sell_price * num_shares
+        cost_basis = avg_buy_price * num_shares
+        profit = total_value - cost_basis
+
+        tax_rate = float(guild_row.get("tax_rate_stock_profit", 20.0))
+        tax = 0.0
+        if profit > 0:
+            tax = round(profit * tax_rate / 100, 2)
+        net_received = round(total_value - tax, 2)
+
         await pool.execute(
             "UPDATE wallets SET digital_balance = digital_balance + $1 WHERE guild_id = $2 AND user_id = $3",
-            total_value, interaction.guild_id, interaction.user.id
+            net_received, interaction.guild_id, interaction.user.id
         )
         sym = guild_row["currency_symbol"]
+        tax_line = f"\n**Profit Tax ({tax_rate:.0f}%):** -{sym}{tax:,.2f}" if tax > 0 else ""
         embed = styled_embed("Sale Successful",
             f"Sold **{num_shares} {stock['ticker']}** shares\n"
-            f"Price per share: {sym}{stock['current_price']:,.4f}\n"
-            f"Total received: {sym}{total_value:,.2f}", color=SUCCESS)
+            f"Price per share: {sym}{sell_price:,.4f}\n"
+            f"Avg buy price: {sym}{avg_buy_price:,.4f}\n"
+            f"Gross value: {sym}{total_value:,.2f}{tax_line}\n"
+            f"**Net received: {sym}{net_received:,.2f}**", color=SUCCESS)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
