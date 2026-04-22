@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from utils.helpers import admin_check, ensure_guild, get_guild, styled_embed, ACCENT, SUCCESS, DANGER, WARNING
+from utils.helpers import admin_check, ensure_guild, get_guild, styled_embed, styled_embed_formal, ACCENT, SUCCESS, DANGER, WARNING
 from db.queries.wallets import (
     get_or_create_wallet, add_cash, transfer_cash_to_digital,
     transfer_digital_to_cash, admin_grant, admin_deduct
@@ -368,10 +368,10 @@ class BusinessApplicationModal(discord.ui.Modal, title="Business Application"):
             self.industry.value
         )
         embed = styled_embed(
-            "Application Submitted",
-            f"Your business **{self.name.value}** has been submitted for admin review.\n"
+            "Application Received",
+            f"Your application for **{self.name.value}** has been received and is pending review by G.R.E.T.A. authorities.\n"
             f"Application ID: `#{app_id}`\n\n"
-            f"You'll be notified once it's reviewed.",
+            f"You will be notified once a decision has been made.",
             color=SUCCESS
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -501,7 +501,7 @@ async def handle_profile(interaction: discord.Interaction):
         value=f"**{sym}{net_worth:,.2f}** ≈ **${net_worth_usd:,.2f} USD**",
         inline=False
     )
-    embed.set_footer(text=f"Economy System  ·  {name} ({sym})")
+    embed.set_footer(text=f"G.R.E.T.A. — Universalis Banking System  ·  {name} ({sym})")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
