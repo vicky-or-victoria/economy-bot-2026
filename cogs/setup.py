@@ -2,7 +2,7 @@ import traceback
 import discord
 from discord import app_commands
 from discord.ext import commands
-from utils.helpers import is_admin, ensure_guild, get_guild, styled_embed, ACCENT, SUCCESS, DANGER, WARNING
+from utils.helpers import is_admin, ensure_guild, get_guild, styled_embed, styled_embed_formal, ACCENT, SUCCESS, DANGER, WARNING
 from db.connection import get_pool
 
 
@@ -242,7 +242,7 @@ class Setup(commands.Cog):
             review_channel_id = guild_row.get("review_channel_id") if guild_row else None
             if not review_channel_id:
                 await interaction.followup.send(
-                    "No review channel set. Use `/setup_review_channel` first.", ephemeral=True
+                    "G.R.E.T.A. has no review channel configured. Use `/setup_review_channel` to assign one.", ephemeral=True
                 )
                 return
 
