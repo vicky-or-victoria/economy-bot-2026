@@ -25,16 +25,15 @@ class EconBot(commands.Bot):
             await self.load_extension(cog)
         await self.tree.sync()
         print(f"Synced slash commands.")
-        
-# Set bot status
+
+    async def on_ready(self):
         await self.change_presence(
+            status=discord.Status.online,
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
                 name="Faith in God & the Economy."
             )
         )
-        
-    async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
 
     async def close(self):
