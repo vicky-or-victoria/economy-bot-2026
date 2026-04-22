@@ -194,8 +194,8 @@ async def handle_daily(interaction: discord.Interaction, business_id: int):
         await deduct_company_wallet(business_id, salary)
 
     await pool.execute(
-        "UPDATE businesses SET last_daily = NOW(), revenue = revenue + $1 WHERE id = $2",
-        salary, business_id
+        "UPDATE businesses SET last_daily = NOW() WHERE id = $1",
+        business_id
     )
     await add_cash(interaction.guild_id, interaction.user.id, net)
 
@@ -320,7 +320,7 @@ async def handle_stats(interaction: discord.Interaction, business_id: int):
         f"**Industry:** {business['industry']}\n"
         f"**Status:** {public_status}\n"
         f"**Company Wallet:** {sym}{business['company_wallet']:,.2f}\n"
-        f"**Total Revenue:** {sym}{business['revenue']:,.2f}\n"
+        f"**Daily Revenue Rate:** {sym}{business['revenue']:,.2f}/day\n"
         f"**CEO Salary:** {sym}{business['ceo_salary']:,.2f}/day\n"
         f"{stock_info}",
         color=ACCENT
@@ -442,7 +442,7 @@ async def handle_expand(interaction: discord.Interaction, business_id: int):
         f"Submit an expansion proposal to grow your business. Admins will review it and "
         f"may approve, deny, or modify the revenue increase.\n\n"
         f"**Current Company Wallet:** {sym}{business['company_wallet']:,.2f}\n"
-        f"**Total Revenue:** {sym}{business['revenue']:,.2f}\n\n"
+        f"**Daily Revenue Rate:** {sym}{business['revenue']:,.2f}/day\n\n"
         f"Describe your expansion in as much detail as possible — the more convincing "
         f"the proposal, the better your chances of approval.",
         color=ACCENT
@@ -525,7 +525,28 @@ class ExpansionModal(discord.ui.Modal, title="Expansion Proposal"):
             ephemeral=True
         )
 
-        if guild_row["admin_role_id"]:
+        if guild_row["review_channel_id"]:
+            review_channel = interaction.guild.get_channel(guild_row["review_channel_id"])
+            if review_channel:
+                try:
+                    role_mention = f"<@&{guild_row['admin_role_id']}> " if guild_row["admin_role_id"] else ""
+                    notify = styled_embed(
+                        f"🏗️ Expansion Proposal #{proposal_id}",
+                        f"**{business['name']}** by <@{interaction.user.id}>\n\n"
+                        f"**Title:** {self.title_input.value}\n"
+                        f"**Est. Revenue Increase:** {sym}{est_rev:,.2f}/day\n\n"
+                        f"{self.description_input.value}",
+                        color=WARNING
+                    )
+                    await review_channel.send(
+                        content=role_mention.strip() or None,
+                        embed=notify,
+                        view=ExpansionReviewView(proposal_id)
+                    )
+                except Exception:
+                    pass
+        elif guild_row["admin_role_id"]:
+            # Fallback: ping admin role in current channel
             role = interaction.guild.get_role(guild_row["admin_role_id"])
             if role and interaction.channel:
                 try:
@@ -776,7 +797,7 @@ async def _build_business_embed(business: dict, guild_row: dict) -> discord.Embe
         f"**Description:** {business['description']}\n\n"
         f"**Status:** {public_status}{stock_line}\n"
         f"**Company Wallet:** {sym}{business['company_wallet']:,.2f}\n"
-        f"**Total Revenue:** {sym}{business['revenue']:,.2f}\n"
+        f"**Daily Revenue Rate:** {sym}{business['revenue']:,.2f}/day\n"
         f"**CEO Salary:** {sym}{business['ceo_salary']:,.2f}/day\n"
         f"**Listed Since:** <t:{int(business['created_at'].timestamp())}:D>",
         color=ACCENT
