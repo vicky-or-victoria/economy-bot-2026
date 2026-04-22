@@ -81,27 +81,24 @@ async def set_ceo_salary(business_id: int, salary: float):
 
 async def claim_daily_salary(business_id: int) -> float:
     """
-    Deposits one day of revenue into company_wallet and marks last_daily.
-    Returns the salary amount that should be paid to the CEO (before tax).
+    Marks last_daily and returns the CEO salary amount (before tax).
+    Does NOT touch revenue — revenue is the daily rate set only by Work + Expansions.
     """
     pool = get_pool()
     biz = await pool.fetchrow("SELECT * FROM businesses WHERE id = $1", business_id)
     await pool.execute(
-        """UPDATE businesses
-           SET last_daily = NOW(),
-               revenue = revenue + ceo_salary,
-               company_wallet = company_wallet + ceo_salary
-           WHERE id = $1""",
+        "UPDATE businesses SET last_daily = NOW() WHERE id = $1",
         business_id
     )
     return float(biz["ceo_salary"])
 
 
 async def add_company_revenue(business_id: int, amount: float):
-    """Add revenue to company wallet (e.g. from approved expansions)."""
+    """Increase the daily revenue rate only (e.g. from approved expansions).
+    Does NOT touch company_wallet — wallet is only filled by Work."""
     pool = get_pool()
     await pool.execute(
-        "UPDATE businesses SET revenue = revenue + $1, company_wallet = company_wallet + $1 WHERE id = $2",
+        "UPDATE businesses SET revenue = revenue + $1 WHERE id = $2",
         amount, business_id
     )
 
@@ -230,7 +227,9 @@ async def resolve_expansion(proposal_id: int, status: str, admin_note: str, appr
     )
     if status == "approved" and approved_revenue:
         proposal = await pool.fetchrow("SELECT business_id FROM expansion_proposals WHERE id = $1", proposal_id)
+        # Only update the daily revenue RATE — never touches company_wallet.
+        # The Work button is what deposits revenue into the wallet.
         await pool.execute(
-            "UPDATE businesses SET revenue = revenue + $1, company_wallet = company_wallet + $1 WHERE id = $2",
+            "UPDATE businesses SET revenue = revenue + $1 WHERE id = $2",
             approved_revenue, proposal["business_id"]
         )
