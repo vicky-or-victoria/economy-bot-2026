@@ -1218,6 +1218,7 @@ class ReviewView(discord.ui.View):
 class ExpansionReviewView(discord.ui.View):
     def __init__(self, proposal_id: int, estimated_revenue: float, owner_id: int):
         super().__init__(timeout=180)
+        super().__init__(title="Expansion Decision")
         self.proposal_id = proposal_id
         self.estimated_revenue = estimated_revenue
         self.owner_id = owner_id
@@ -1241,7 +1242,7 @@ class ExpansionReviewView(discord.ui.View):
         )
 
 
-class ExpansionDecisionModal(discord.ui.Modal, title="Expansion Decision"):
+class ExpansionDecisionModal(discord.ui.Modal):
     reason = discord.ui.TextInput(
         label="Roleplay Reason / Admin Note",
         style=discord.TextStyle.paragraph,
@@ -1256,11 +1257,21 @@ class ExpansionDecisionModal(discord.ui.Modal, title="Expansion Decision"):
     )
 
     def __init__(self, proposal_id: int, decision: str, estimated_revenue: float, owner_id: int):
-        super().__init__()
+        super().__init__(title="Expansion Decision")
         self.proposal_id = proposal_id
         self.decision = decision
         self.estimated_revenue = estimated_revenue
         self.owner_id = owner_id
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import traceback
+        traceback.print_exception(type(error), error, error.__traceback__)
+        try:
+            await interaction.followup.send(
+                f"An error occurred processing this decision: `{error}`", ephemeral=True
+            )
+        except Exception:
+            pass
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
