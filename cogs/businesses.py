@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timezone
-from utils.helpers import admin_check, ensure_guild, styled_embed, ACCENT, SUCCESS, DANGER, WARNING
+from utils.helpers import admin_check, is_admin, ensure_guild, styled_embed, ACCENT, SUCCESS, DANGER, WARNING
 from utils.graphs import generate_business_chart
 from db.queries.businesses import (
     get_pending_applications, get_application, approve_application,
@@ -890,30 +890,37 @@ class Businesses(commands.Cog):
     @app_commands.command(name="review_expansion", description="Approve, deny or modify an expansion proposal.")
     @app_commands.describe(proposal_id="The expansion proposal ID")
     async def review_expansion_cmd(self, interaction: discord.Interaction, proposal_id: int):
-        if not await admin_check(interaction):
-            return
-        proposal = await get_expansion(proposal_id)
-        if not proposal:
-            await interaction.response.send_message("Proposal not found.", ephemeral=True)
-            return
-        if proposal["status"] != "pending":
-            await interaction.response.send_message(f"Proposal already **{proposal['status']}**.", ephemeral=True)
-            return
-        pool = get_pool()
-        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
-        sym = guild_row["currency_symbol"]
-        await interaction.response.send_message(
-            embed=styled_embed(
-                f"Expansion #{proposal_id}: {proposal['title']}",
-                f"**Business:** {proposal['business_name']}\n"
-                f"**Owner:** <@{proposal['owner_id']}>\n\n"
-                f"**Description:**\n{proposal['description']}\n\n"
-                f"**Estimated Revenue:** {sym}{proposal['estimated_revenue']:,.2f}/day",
-                color=WARNING
-            ),
-            view=ExpansionReviewView(proposal_id, float(proposal["estimated_revenue"]), proposal["owner_id"]),
-            ephemeral=True
-        )
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if not await is_admin(interaction):
+                await interaction.followup.send("You don't have permission to use this command.", ephemeral=True)
+                return
+            proposal = await get_expansion(proposal_id)
+            if not proposal:
+                await interaction.followup.send("Proposal not found.", ephemeral=True)
+                return
+            if proposal["status"] != "pending":
+                await interaction.followup.send(f"Proposal already **{proposal['status']}**.", ephemeral=True)
+                return
+            pool = get_pool()
+            guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+            sym = guild_row["currency_symbol"]
+            await interaction.followup.send(
+                embed=styled_embed(
+                    f"Expansion #{proposal_id}: {proposal['title']}",
+                    f"**Business:** {proposal['business_name']}\n"
+                    f"**Owner:** <@{proposal['owner_id']}>\n\n"
+                    f"**Description:**\n{proposal['description']}\n\n"
+                    f"**Estimated Revenue:** {sym}{proposal['estimated_revenue']:,.2f}/day",
+                    color=WARNING
+                ),
+                view=ExpansionReviewView(proposal_id, float(proposal["estimated_revenue"]), proposal["owner_id"]),
+                ephemeral=True
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(f"Error: `{e}`", ephemeral=True)
 
     # ── Admin: delete businesses ──────────────────────────────────────────────
 
