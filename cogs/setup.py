@@ -130,6 +130,27 @@ class Setup(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ── /setup_review_channel ─────────────────────────────────────────────────
+
+    @app_commands.command(name="setup_review_channel", description="Set the channel where business applications and expansion proposals are sent for review.")
+    @app_commands.describe(channel="The text channel admins will use to review submissions")
+    async def setup_review_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await admin_check(interaction):
+            return
+        await ensure_guild(interaction.guild_id)
+        pool = get_pool()
+        await pool.execute(
+            "UPDATE guilds SET review_channel_id = $1 WHERE guild_id = $2",
+            channel.id, interaction.guild_id
+        )
+        embed = styled_embed(
+            "Review Channel Set",
+            f"New business applications and expansion proposals will be posted in {channel.mention} for admin review.\n\n"
+            f"Each submission will appear as an embed with **Approve / Reject** buttons directly in that channel.",
+            color=SUCCESS
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # ── /setup_business_channel ───────────────────────────────────────────────
 
     @app_commands.command(name="setup_business_channel", description="Set the forum channel where business threads will be created.")
@@ -182,8 +203,114 @@ class Setup(commands.Cog):
         embed.add_field(name="Menu Channel", value=fmt_channel(row["menu_channel_id"]), inline=True)
         embed.add_field(name="Stock Channel", value=fmt_channel(row["stock_channel_id"]), inline=True)
         embed.add_field(name="Business Channel", value=fmt_channel(row["business_channel_id"]), inline=True)
+        embed.add_field(name="Review Channel", value=fmt_channel(row.get("review_channel_id")), inline=True)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /post_pending_reviews ─────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="post_pending_reviews",
+        description="Post all pending business applications and expansion proposals into the review channel."
+    )
+    async def post_pending_reviews(self, interaction: discord.Interaction):
+        if not await admin_check(interaction):
+            return
+        await ensure_guild(interaction.guild_id)
+        pool = get_pool()
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+
+        review_channel_id = guild_row.get("review_channel_id") if guild_row else None
+        if not review_channel_id:
+            await interaction.response.send_message(
+                "No review channel set. Use `/setup_review_channel` first.",
+                ephemeral=True
+            )
+            return
+
+        review_channel = interaction.guild.get_channel(review_channel_id)
+        if not review_channel:
+            await interaction.response.send_message(
+                "Review channel not found. It may have been deleted. Use `/setup_review_channel` to set a new one.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        sym = guild_row["currency_symbol"]
+        admin_role_id = guild_row.get("admin_role_id")
+        role_mention = f"<@&{admin_role_id}>" if admin_role_id else None
+
+        from cogs.businesses import ReviewView, ExpansionReviewView
+        from utils.helpers import WARNING
+
+        # ── Pending business applications ──
+        apps = await pool.fetch(
+            "SELECT * FROM business_applications WHERE guild_id = $1 AND status = 'pending' ORDER BY created_at",
+            interaction.guild_id
+        )
+        app_count = 0
+        for app in apps:
+            try:
+                embed = styled_embed(
+                    f"📋 Business Application #{app['id']}",
+                    f"**{app['name']}** by <@{app['owner_id']}>\n"
+                    f"**Industry:** {app['industry']}\n\n"
+                    f"{app['description']}",
+                    color=WARNING
+                )
+                await review_channel.send(
+                    content=role_mention,
+                    embed=embed,
+                    view=ReviewView(app["id"], self.bot)
+                )
+                app_count += 1
+            except Exception:
+                pass
+
+        # ── Pending expansion proposals ──
+        expansions = await pool.fetch(
+            """SELECT ep.*, b.name AS business_name
+               FROM expansion_proposals ep
+               JOIN businesses b ON b.id = ep.business_id
+               WHERE ep.guild_id = $1 AND ep.status = 'pending'
+               ORDER BY ep.created_at""",
+            interaction.guild_id
+        )
+        exp_count = 0
+        for exp in expansions:
+            try:
+                embed = styled_embed(
+                    f"🏗️ Expansion Proposal #{exp['id']}: {exp['title']}",
+                    f"**Business:** {exp['business_name']}\n"
+                    f"**Owner:** <@{exp['owner_id']}>\n\n"
+                    f"**Description:**\n{exp['description']}\n\n"
+                    f"**Estimated Revenue:** {sym}{exp['estimated_revenue']:,.2f}/day",
+                    color=WARNING
+                )
+                await review_channel.send(
+                    content=role_mention,
+                    embed=embed,
+                    view=ExpansionReviewView(exp["id"])
+                )
+                exp_count += 1
+            except Exception:
+                pass
+
+        total = app_count + exp_count
+        if total == 0:
+            await interaction.followup.send("No pending applications or proposals to post.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                embed=styled_embed(
+                    "Pending Reviews Posted",
+                    f"Posted **{app_count}** business application(s) and "
+                    f"**{exp_count}** expansion proposal(s) to {review_channel.mention}.",
+                    color=SUCCESS
+                ),
+                ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot):
