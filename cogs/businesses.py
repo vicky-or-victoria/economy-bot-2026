@@ -529,36 +529,21 @@ class ExpansionModal(discord.ui.Modal, title="Expansion Proposal"):
             review_channel = interaction.guild.get_channel(guild_row["review_channel_id"])
             if review_channel:
                 try:
-                    role_mention = f"<@&{guild_row['admin_role_id']}> " if guild_row["admin_role_id"] else ""
+                    role_mention = f"<@&{guild_row['admin_role_id']}>" if guild_row["admin_role_id"] else None
                     notify = styled_embed(
                         f"🏗️ Expansion Proposal #{proposal_id}",
-                        f"**{business['name']}** by <@{interaction.user.id}>\n\n"
-                        f"**Title:** {self.title_input.value}\n"
+                        f"**{business['name']}** by <@{interaction.user.id}>\n"
+                        f"**Industry:** {business['industry']}\n\n"
+                        f"**Proposal:** {self.title_input.value}\n"
                         f"**Est. Revenue Increase:** {sym}{est_rev:,.2f}/day\n\n"
                         f"{self.description_input.value}",
                         color=WARNING
                     )
                     await review_channel.send(
-                        content=role_mention.strip() or None,
+                        content=role_mention,
                         embed=notify,
                         view=ExpansionReviewView(proposal_id)
                     )
-                except Exception:
-                    pass
-        elif guild_row["admin_role_id"]:
-            # Fallback: ping admin role in current channel
-            role = interaction.guild.get_role(guild_row["admin_role_id"])
-            if role and interaction.channel:
-                try:
-                    notify = styled_embed(
-                        f"🏗️ Expansion Proposal #{proposal_id}",
-                        f"**{business['name']}** by <@{interaction.user.id}>\n\n"
-                        f"**Title:** {self.title_input.value}\n"
-                        f"**Est. Revenue:** {sym}{est_rev:,.2f}/day\n\n"
-                        f"Use `/review_expansion {proposal_id}` to review.",
-                        color=WARNING
-                    )
-                    await interaction.channel.send(content=role.mention, embed=notify)
                 except Exception:
                     pass
 
