@@ -7,19 +7,18 @@ from utils.graphs import generate_business_chart
 from db.queries.businesses import (
     get_pending_applications, get_application, approve_application,
     reject_application, get_business, update_business_message,
-    update_daily, set_business_public
+    set_business_public, set_ceo_salary, claim_daily_salary,
+    deduct_company_wallet, create_expansion_proposal,
+    get_pending_expansions, get_expansion, resolve_expansion
 )
 from db.queries.stocks import (
     create_stock, get_stock_by_ticker, get_stock_by_business,
-    get_price_history, complete_ipo
+    get_price_history, complete_ipo, get_holders_of_stock, get_total_shares
 )
-from db.queries.wallets import add_cash
+from db.queries.wallets import add_cash, get_or_create_wallet
 from db.connection import get_pool
 
 DAILY_COOLDOWN_HOURS = 20
-DAILY_REWARD = 500.0
-
-# IPO: owner sets a price and the stock goes live
 IPO_MIN_PRICE = 1.0
 
 
@@ -30,33 +29,63 @@ def _forum_thread_name(member: discord.Member | None, username: str, business_na
     return f"{display} — {business_name}"
 
 
+def _tax(amount: float, rate_pct: float) -> tuple[float, float]:
+    """Returns (net_after_tax, tax_amount)."""
+    tax = round(amount * rate_pct / 100, 2)
+    return round(amount - tax, 2), tax
+
+
 # ── Business post persistent view ─────────────────────────────────────────────
 
 class BusinessPostView(discord.ui.View):
     def __init__(self, business_id: int):
         super().__init__(timeout=None)
         self.business_id = business_id
-        self.daily_button.custom_id = f"biz:daily:{business_id}"
-        self.stats_button.custom_id  = f"biz:stats:{business_id}"
-        self.ipo_button.custom_id    = f"biz:ipo:{business_id}"
+        self.daily_button.custom_id   = f"biz:daily:{business_id}"
+        self.stats_button.custom_id   = f"biz:stats:{business_id}"
+        self.ipo_button.custom_id     = f"biz:ipo:{business_id}"
+        self.salary_button.custom_id  = f"biz:salary:{business_id}"
+        self.expand_button.custom_id  = f"biz:expand:{business_id}"
+        self.dividend_button.custom_id = f"biz:dividend:{business_id}"
 
-    @discord.ui.button(label="Daily Claim", style=discord.ButtonStyle.success, custom_id="biz:daily:0")
+    @discord.ui.button(label="💰 Claim Salary", style=discord.ButtonStyle.success, custom_id="biz:daily:0")
     async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_daily(interaction, self.business_id)
 
-    @discord.ui.button(label="Stats", style=discord.ButtonStyle.secondary, custom_id="biz:stats:0")
+    @discord.ui.button(label="📊 Stats", style=discord.ButtonStyle.secondary, custom_id="biz:stats:0")
     async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_stats(interaction, self.business_id)
 
-    @discord.ui.button(label="Go Public (IPO)", style=discord.ButtonStyle.primary, custom_id="biz:ipo:0")
+    @discord.ui.button(label="🚀 Go Public (IPO)", style=discord.ButtonStyle.primary, custom_id="biz:ipo:0")
     async def ipo_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_ipo_button(interaction, self.business_id)
 
+    @discord.ui.button(label="💼 Set Salary", style=discord.ButtonStyle.secondary, custom_id="biz:salary:0")
+    async def salary_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_set_salary(interaction, self.business_id)
+
+    @discord.ui.button(label="🏗️ Expand", style=discord.ButtonStyle.primary, custom_id="biz:expand:0")
+    async def expand_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_expand(interaction, self.business_id)
+
+    @discord.ui.button(label="💸 Pay Dividends", style=discord.ButtonStyle.danger, custom_id="biz:dividend:0")
+    async def dividend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_dividend(interaction, self.business_id)
+
+
+# ── Daily salary claim ────────────────────────────────────────────────────────
 
 async def handle_daily(interaction: discord.Interaction, business_id: int):
     business = await get_business(business_id)
     if not business or business["owner_id"] != interaction.user.id:
         await interaction.response.send_message("This isn't your business.", ephemeral=True)
+        return
+
+    if float(business["ceo_salary"]) <= 0:
+        await interaction.response.send_message(
+            "Your CEO salary is set to **0**. Use **Set Salary** to configure it first.",
+            ephemeral=True
+        )
         return
 
     now = datetime.now(timezone.utc)
@@ -68,21 +97,130 @@ async def handle_daily(interaction: discord.Interaction, business_id: int):
         if elapsed < DAILY_COOLDOWN_HOURS:
             remaining = DAILY_COOLDOWN_HOURS - elapsed
             h, m = int(remaining), int((remaining % 1) * 60)
-            embed = styled_embed("Daily Already Claimed",
+            embed = styled_embed("Salary Already Claimed",
                 f"Come back in **{h}h {m}m**.", color=WARNING)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
     pool = get_pool()
     guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
-    await update_daily(business_id, DAILY_REWARD)
-    await add_cash(interaction.guild_id, interaction.user.id, DAILY_REWARD)
     sym = guild_row["currency_symbol"]
-    embed = styled_embed("Daily Claimed",
-        f"You earned **{sym}{DAILY_REWARD:,.2f}** from **{business['name']}**.\n"
-        f"Come back in {DAILY_COOLDOWN_HOURS} hours.", color=SUCCESS)
+    tax_rate = float(guild_row["tax_rate_salary"])
+
+    salary = float(business["ceo_salary"])
+    net, tax = _tax(salary, tax_rate)
+
+    # Revenue accrues to company wallet first, then CEO pulls salary from it
+    ok = await deduct_company_wallet(business_id, salary)
+    if not ok:
+        # Company wallet doesn't have enough — still log the daily but pay from company wallet balance
+        biz = await get_business(business_id)
+        available = float(biz["company_wallet"])
+        if available <= 0:
+            await interaction.response.send_message(
+                f"Your company wallet is empty (**{sym}0.00**). "
+                f"Revenue must accumulate before you can claim your salary.",
+                ephemeral=True
+            )
+            return
+        salary = available
+        net, tax = _tax(salary, tax_rate)
+        await deduct_company_wallet(business_id, salary)
+
+    # Mark daily claimed and add revenue to company
+    await pool.execute(
+        "UPDATE businesses SET last_daily = NOW(), revenue = revenue + $1 WHERE id = $2",
+        salary, business_id
+    )
+    await add_cash(interaction.guild_id, interaction.user.id, net)
+
+    embed = styled_embed(
+        "💰 Salary Claimed",
+        f"**Gross Salary:** {sym}{salary:,.2f}\n"
+        f"**Tax ({tax_rate:.0f}%):** -{sym}{tax:,.2f}\n"
+        f"**Net to Wallet:** {sym}{net:,.2f}\n\n"
+        f"Come back in {DAILY_COOLDOWN_HOURS} hours.",
+        color=SUCCESS
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+# ── Set salary ────────────────────────────────────────────────────────────────
+
+async def handle_set_salary(interaction: discord.Interaction, business_id: int):
+    business = await get_business(business_id)
+    if not business or business["owner_id"] != interaction.user.id:
+        await interaction.response.send_message("This isn't your business.", ephemeral=True)
+        return
+
+    pool = get_pool()
+    guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+    sym = guild_row["currency_symbol"]
+    max_pct = float(guild_row["salary_max_pct"])
+    daily_revenue = float(business["revenue"])
+    max_salary = daily_revenue * max_pct / 100 if daily_revenue > 0 else 0
+
+    embed = styled_embed(
+        "💼 Set CEO Salary",
+        f"**Current Salary:** {sym}{business['ceo_salary']:,.2f}/day\n"
+        f"**Total Company Revenue:** {sym}{daily_revenue:,.2f}\n"
+        f"**Max Allowed ({max_pct:.0f}% of revenue):** {sym}{max_salary:,.2f}/day\n\n"
+        f"Your salary is deducted from the company wallet each time you claim it. "
+        f"The company wallet earns revenue through work and expansion approvals.",
+        color=ACCENT
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        view=SetSalaryView(business_id, max_salary, sym),
+        ephemeral=True
+    )
+
+
+class SetSalaryView(discord.ui.View):
+    def __init__(self, business_id: int, max_salary: float, sym: str):
+        super().__init__(timeout=60)
+        self.business_id = business_id
+        self.max_salary = max_salary
+        self.sym = sym
+
+    @discord.ui.button(label="Set Salary Amount", style=discord.ButtonStyle.primary)
+    async def set_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SalaryModal(self.business_id, self.max_salary, self.sym))
+
+
+class SalaryModal(discord.ui.Modal, title="Set CEO Salary"):
+    amount = discord.ui.TextInput(label="Daily Salary Amount", placeholder="e.g. 500", max_length=16)
+
+    def __init__(self, business_id: int, max_salary: float, sym: str):
+        super().__init__()
+        self.business_id = business_id
+        self.max_salary = max_salary
+        self.sym = sym
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            val = float(self.amount.value.replace(",", ""))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Invalid amount.", ephemeral=True)
+            return
+
+        if self.max_salary > 0 and val > self.max_salary:
+            await interaction.response.send_message(
+                f"Salary exceeds the maximum allowed ({self.sym}{self.max_salary:,.2f}/day). "
+                f"Grow your business revenue first.",
+                ephemeral=True
+            )
+            return
+
+        await set_ceo_salary(self.business_id, val)
+        embed = styled_embed("Salary Updated",
+            f"CEO salary set to **{self.sym}{val:,.2f}/day**.", color=SUCCESS)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
 
 async def handle_stats(interaction: discord.Interaction, business_id: int):
     await interaction.response.defer(ephemeral=True)
@@ -99,13 +237,14 @@ async def handle_stats(interaction: discord.Interaction, business_id: int):
     public_status = "Public 📈" if business["is_public"] else "Private 🔒"
     stock_info = ""
     if stock and stock["ipo_completed"]:
+        total_shares = await get_total_shares(stock["id"])
         stock_info = (
-            f"**Stock Ticker:** {stock['ticker']}\n"
-            f"**Stock Price:** {sym}{stock['current_price']:,.4f}\n"
-            f"**IPO Price:** {sym}{stock['ipo_price']:,.4f}"
+            f"**Ticker:** {stock['ticker']} @ {sym}{stock['current_price']:,.4f}\n"
+            f"**IPO Price:** {sym}{stock['ipo_price']:,.4f}\n"
+            f"**Total Shares:** {total_shares:,.2f}"
         )
     elif stock:
-        stock_info = f"**Stock Ticker:** {stock['ticker']} *(IPO pending)*"
+        stock_info = f"**Ticker:** {stock['ticker']} *(IPO pending)*"
     else:
         stock_info = "**Stock:** Not listed"
 
@@ -113,7 +252,9 @@ async def handle_stats(interaction: discord.Interaction, business_id: int):
         business["name"],
         f"**Industry:** {business['industry']}\n"
         f"**Status:** {public_status}\n"
+        f"**Company Wallet:** {sym}{business['company_wallet']:,.2f}\n"
         f"**Total Revenue:** {sym}{business['revenue']:,.2f}\n"
+        f"**CEO Salary:** {sym}{business['ceo_salary']:,.2f}/day\n"
         f"{stock_info}",
         color=ACCENT
     )
@@ -130,6 +271,8 @@ async def handle_stats(interaction: discord.Interaction, business_id: int):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+# ── IPO ───────────────────────────────────────────────────────────────────────
+
 async def handle_ipo_button(interaction: discord.Interaction, business_id: int):
     business = await get_business(business_id)
     if not business or business["owner_id"] != interaction.user.id:
@@ -141,24 +284,12 @@ async def handle_ipo_button(interaction: discord.Interaction, business_id: int):
     await interaction.response.send_modal(IPOModal(business_id, business["name"]))
 
 
-# ── IPO Modal ─────────────────────────────────────────────────────────────────
-
 class IPOModal(discord.ui.Modal, title="Launch IPO"):
-    ticker_input = discord.ui.TextInput(
-        label="Stock Ticker (2–5 letters)",
-        placeholder="e.g. ACME",
-        min_length=2, max_length=5
-    )
-    price_input = discord.ui.TextInput(
-        label="IPO Price per Share",
-        placeholder=f"Minimum {IPO_MIN_PRICE}",
-        max_length=12
-    )
-    shares_input = discord.ui.TextInput(
-        label="Total Shares to Issue",
-        placeholder="e.g. 10000",
-        max_length=12
-    )
+    ticker_input = discord.ui.TextInput(label="Stock Ticker (2–5 letters)", placeholder="e.g. ACME",
+                                         min_length=2, max_length=5)
+    price_input  = discord.ui.TextInput(label="IPO Price per Share", placeholder=f"Minimum {IPO_MIN_PRICE}",
+                                         max_length=12)
+    shares_input = discord.ui.TextInput(label="Total Shares to Issue", placeholder="e.g. 10000", max_length=12)
 
     def __init__(self, business_id: int, business_name: str):
         super().__init__()
@@ -167,22 +298,17 @@ class IPOModal(discord.ui.Modal, title="Launch IPO"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
         ticker = self.ticker_input.value.upper().strip()
         if not ticker.isalpha():
             await interaction.followup.send("Ticker must be letters only.", ephemeral=True)
             return
-
         try:
             price = float(self.price_input.value.replace(",", ""))
             if price < IPO_MIN_PRICE:
                 raise ValueError
         except ValueError:
-            await interaction.followup.send(
-                f"Invalid price. Minimum IPO price is {IPO_MIN_PRICE}.", ephemeral=True
-            )
+            await interaction.followup.send(f"Invalid price. Minimum is {IPO_MIN_PRICE}.", ephemeral=True)
             return
-
         try:
             total_shares = float(self.shares_input.value.replace(",", ""))
             if total_shares < 1:
@@ -195,18 +321,12 @@ class IPOModal(discord.ui.Modal, title="Launch IPO"):
         guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
         sym = guild_row["currency_symbol"]
 
-        # Check ticker not taken
         existing = await get_stock_by_ticker(interaction.guild_id, ticker)
         if existing:
-            await interaction.followup.send(
-                f"Ticker `{ticker}` is already taken. Choose another.", ephemeral=True
-            )
+            await interaction.followup.send(f"Ticker `{ticker}` is already taken.", ephemeral=True)
             return
 
-        # Make business public
         await set_business_public(self.business_id, True)
-
-        # Create stock (ipo_completed=False until we flip it)
         stock = await create_stock(
             interaction.guild_id, ticker, self.business_name,
             stock_type="business", business_id=self.business_id,
@@ -215,45 +335,311 @@ class IPOModal(discord.ui.Modal, title="Launch IPO"):
         if stock:
             await complete_ipo(stock["id"])
 
-        # Announce in stock channel
         if guild_row["stock_channel_id"]:
             channel = interaction.guild.get_channel(guild_row["stock_channel_id"])
             if channel:
-                embed = styled_embed(
+                await channel.send(embed=styled_embed(
                     f"🚀 IPO: {self.business_name}",
                     f"**{self.business_name}** has gone public!\n\n"
                     f"**Ticker:** `{ticker}`\n"
                     f"**IPO Price:** {sym}{price:,.4f}\n"
                     f"**Total Shares:** {total_shares:,.0f}\n\n"
-                    f"Owned by <@{interaction.user.id}>. Trade it now from the Stock Market!",
+                    f"Owned by <@{interaction.user.id}>. Trade it now!",
                     color=SUCCESS
-                )
-                await channel.send(embed=embed)
+                ))
 
-        # Update the forum post embed to reflect public status
         business = await get_business(self.business_id)
         if business and business["post_thread_id"]:
             try:
-                thread = interaction.guild.get_channel(business["post_thread_id"])
-                if thread is None:
-                    thread = await interaction.guild.fetch_channel(business["post_thread_id"])
+                thread = interaction.guild.get_channel(business["post_thread_id"]) or \
+                         await interaction.guild.fetch_channel(business["post_thread_id"])
                 if thread:
                     updated_embed = await _build_business_embed(business, guild_row)
-                    # Edit the first message in the thread
                     async for msg in thread.history(limit=1, oldest_first=True):
                         await msg.edit(embed=updated_embed)
             except Exception:
                 pass
 
-        await interaction.followup.send(
+        await interaction.followup.send(embed=styled_embed(
+            "IPO Launched! 🎉",
+            f"**{self.business_name}** is now publicly traded as `{ticker}`.\n"
+            f"IPO price: {sym}{price:,.4f}",
+            color=SUCCESS
+        ), ephemeral=True)
+
+
+# ── Expansion ─────────────────────────────────────────────────────────────────
+
+async def handle_expand(interaction: discord.Interaction, business_id: int):
+    business = await get_business(business_id)
+    if not business or business["owner_id"] != interaction.user.id:
+        await interaction.response.send_message("This isn't your business.", ephemeral=True)
+        return
+
+    pool = get_pool()
+    guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+    sym = guild_row["currency_symbol"]
+
+    embed = styled_embed(
+        "🏗️ Business Expansion",
+        f"**{business['name']}**\n\n"
+        f"Submit an expansion proposal to grow your business. Admins will review it and "
+        f"may approve, deny, or modify the revenue increase.\n\n"
+        f"**Current Company Wallet:** {sym}{business['company_wallet']:,.2f}\n"
+        f"**Total Revenue:** {sym}{business['revenue']:,.2f}\n\n"
+        f"Describe your expansion in as much detail as possible — the more convincing "
+        f"the proposal, the better your chances of approval.",
+        color=ACCENT
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        view=ExpandConfirmView(business_id),
+        ephemeral=True
+    )
+
+
+class ExpandConfirmView(discord.ui.View):
+    def __init__(self, business_id: int):
+        super().__init__(timeout=60)
+        self.business_id = business_id
+
+    @discord.ui.button(label="✅ Write Proposal", style=discord.ButtonStyle.success)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ExpansionModal(self.business_id))
+
+    @discord.ui.button(label="✖ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=styled_embed("Cancelled", "Expansion proposal cancelled.", color=WARNING),
+            view=None
+        )
+
+
+class ExpansionModal(discord.ui.Modal, title="Expansion Proposal"):
+    title_input = discord.ui.TextInput(
+        label="Expansion Title",
+        placeholder="e.g. Open a second location downtown",
+        max_length=100
+    )
+    description_input = discord.ui.TextInput(
+        label="Detailed Description",
+        style=discord.TextStyle.paragraph,
+        placeholder="Describe your expansion plan in detail...",
+        max_length=1000
+    )
+    revenue_input = discord.ui.TextInput(
+        label="Estimated Revenue Increase",
+        placeholder="e.g. 500 (per day)",
+        max_length=16
+    )
+
+    def __init__(self, business_id: int):
+        super().__init__()
+        self.business_id = business_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            est_rev = float(self.revenue_input.value.replace(",", ""))
+            if est_rev <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Invalid revenue estimate.", ephemeral=True)
+            return
+
+        business = await get_business(self.business_id)
+        pool = get_pool()
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+        sym = guild_row["currency_symbol"]
+
+        proposal_id = await create_expansion_proposal(
+            self.business_id, interaction.guild_id, interaction.user.id,
+            self.title_input.value, self.description_input.value, est_rev
+        )
+
+        await interaction.response.send_message(
             embed=styled_embed(
-                "IPO Launched! 🎉",
-                f"**{self.business_name}** is now publicly traded as `{ticker}`.\n"
-                f"IPO price: {sym}{price:,.4f}",
+                "Proposal Submitted ✅",
+                f"Your expansion proposal **#{proposal_id}** for **{business['name']}** "
+                f"has been submitted for admin review.\n\n"
+                f"**Title:** {self.title_input.value}\n"
+                f"**Est. Revenue Increase:** {sym}{est_rev:,.2f}/day\n\n"
+                f"You'll be notified of the decision.",
                 color=SUCCESS
             ),
             ephemeral=True
         )
+
+        # Notify admins
+        if guild_row["admin_role_id"]:
+            role = interaction.guild.get_role(guild_row["admin_role_id"])
+            if role and interaction.channel:
+                try:
+                    notify = styled_embed(
+                        f"🏗️ Expansion Proposal #{proposal_id}",
+                        f"**{business['name']}** by <@{interaction.user.id}>\n\n"
+                        f"**Title:** {self.title_input.value}\n"
+                        f"**Est. Revenue:** {sym}{est_rev:,.2f}/day\n\n"
+                        f"Use `/review_expansion {proposal_id}` to review.",
+                        color=WARNING
+                    )
+                    await interaction.channel.send(content=role.mention, embed=notify)
+                except Exception:
+                    pass
+
+
+# ── Dividends ─────────────────────────────────────────────────────────────────
+
+async def handle_dividend(interaction: discord.Interaction, business_id: int):
+    business = await get_business(business_id)
+    if not business or business["owner_id"] != interaction.user.id:
+        await interaction.response.send_message("This isn't your business.", ephemeral=True)
+        return
+
+    if not business["is_public"]:
+        await interaction.response.send_message(
+            "Dividends can only be paid to public companies with stockholders.", ephemeral=True
+        )
+        return
+
+    stock = await get_stock_by_business(business_id)
+    if not stock or not stock["ipo_completed"]:
+        await interaction.response.send_message("No active stock found for this business.", ephemeral=True)
+        return
+
+    pool = get_pool()
+    guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+    sym = guild_row["currency_symbol"]
+    tax_rate = float(guild_row["tax_rate_dividend"])
+    company_wallet = float(business["company_wallet"])
+
+    total_shares = await get_total_shares(stock["id"])
+    if total_shares <= 0:
+        await interaction.response.send_message("No shareholders to pay dividends to.", ephemeral=True)
+        return
+
+    embed = styled_embed(
+        "💸 Pay Dividends",
+        f"**Company Wallet:** {sym}{company_wallet:,.2f}\n"
+        f"**Total Shares Outstanding:** {total_shares:,.2f}\n"
+        f"**Dividend Tax:** {tax_rate:.0f}% (deducted from each shareholder's payout)\n\n"
+        f"Enter the total dividend pool to distribute. It will be split proportionally "
+        f"by share count among all holders. Deducted from company wallet.",
+        color=ACCENT
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        view=DividendConfirmView(business_id, stock["id"], company_wallet, total_shares, tax_rate, sym),
+        ephemeral=True
+    )
+
+
+class DividendConfirmView(discord.ui.View):
+    def __init__(self, business_id, stock_id, company_wallet, total_shares, tax_rate, sym):
+        super().__init__(timeout=60)
+        self.business_id = business_id
+        self.stock_id = stock_id
+        self.company_wallet = company_wallet
+        self.total_shares = total_shares
+        self.tax_rate = tax_rate
+        self.sym = sym
+
+    @discord.ui.button(label="Set Dividend Amount", style=discord.ButtonStyle.danger)
+    async def pay_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            DividendModal(self.business_id, self.stock_id, self.company_wallet,
+                          self.total_shares, self.tax_rate, self.sym)
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=styled_embed("Cancelled", "Dividend payment cancelled.", color=WARNING), view=None
+        )
+
+
+class DividendModal(discord.ui.Modal, title="Pay Dividends"):
+    pool_input = discord.ui.TextInput(label="Total Dividend Pool", placeholder="e.g. 10000", max_length=16)
+
+    def __init__(self, business_id, stock_id, company_wallet, total_shares, tax_rate, sym):
+        super().__init__()
+        self.business_id = business_id
+        self.stock_id = stock_id
+        self.company_wallet = company_wallet
+        self.total_shares = total_shares
+        self.tax_rate = tax_rate
+        self.sym = sym
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pool_amount = float(self.pool_input.value.replace(",", ""))
+            if pool_amount <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send("Invalid amount.", ephemeral=True)
+            return
+
+        if pool_amount > self.company_wallet:
+            await interaction.followup.send(
+                f"Insufficient company wallet balance. "
+                f"Available: {self.sym}{self.company_wallet:,.2f}",
+                ephemeral=True
+            )
+            return
+
+        ok = await deduct_company_wallet(self.business_id, pool_amount)
+        if not ok:
+            await interaction.followup.send("Failed to deduct from company wallet.", ephemeral=True)
+            return
+
+        holders = await get_holders_of_stock(self.stock_id)
+        if not holders:
+            await interaction.followup.send("No shareholders found.", ephemeral=True)
+            return
+
+        pool = get_pool()
+        paid_count = 0
+        total_paid = 0.0
+        for holder in holders:
+            share_fraction = float(holder["shares"]) / self.total_shares
+            gross = pool_amount * share_fraction
+            net, tax = _tax(gross, self.tax_rate)
+            await add_cash(holder["guild_id"], holder["user_id"], net)
+            total_paid += net
+            paid_count += 1
+
+            # Try to DM each shareholder
+            try:
+                guild = interaction.guild
+                member = guild.get_member(holder["user_id"])
+                guild_row = await pool.fetchrow(
+                    "SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id
+                )
+                sym = guild_row["currency_symbol"]
+                if member:
+                    await member.send(embed=styled_embed(
+                        "💸 Dividend Payment",
+                        f"You received a dividend from a business you hold shares in.\n\n"
+                        f"**Gross:** {sym}{gross:,.2f}\n"
+                        f"**Tax ({self.tax_rate:.0f}%):** -{sym}{tax:,.2f}\n"
+                        f"**Net to Cash Wallet:** {sym}{net:,.2f}",
+                        color=SUCCESS
+                    ))
+            except Exception:
+                pass
+
+        business = await get_business(self.business_id)
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+        sym = guild_row["currency_symbol"]
+        await interaction.followup.send(embed=styled_embed(
+            "Dividends Paid ✅",
+            f"**Total Pool:** {sym}{pool_amount:,.2f}\n"
+            f"**Shareholders Paid:** {paid_count}\n"
+            f"**Total Distributed (after tax):** {sym}{total_paid:,.2f}\n"
+            f"**Dividend Tax Rate:** {self.tax_rate:.0f}%\n\n"
+            f"All shareholders have been notified via DM.",
+            color=SUCCESS
+        ), ephemeral=True)
 
 
 # ── Embed builder ─────────────────────────────────────────────────────────────
@@ -265,7 +651,7 @@ async def _build_business_embed(business: dict, guild_row: dict) -> discord.Embe
     stock = await get_stock_by_business(business["id"])
     stock_line = ""
     if stock and stock["ipo_completed"]:
-        stock_line = f"\n**Stock Ticker:** `{stock['ticker']}` @ {sym}{stock['current_price']:,.4f}"
+        stock_line = f"\n**Stock:** `{stock['ticker']}` @ {sym}{stock['current_price']:,.4f}"
 
     embed = styled_embed(
         business["name"],
@@ -273,7 +659,9 @@ async def _build_business_embed(business: dict, guild_row: dict) -> discord.Embe
         f"**Industry:** {business['industry']}\n"
         f"**Description:** {business['description']}\n\n"
         f"**Status:** {public_status}{stock_line}\n"
+        f"**Company Wallet:** {sym}{business['company_wallet']:,.2f}\n"
         f"**Total Revenue:** {sym}{business['revenue']:,.2f}\n"
+        f"**CEO Salary:** {sym}{business['ceo_salary']:,.2f}/day\n"
         f"**Listed Since:** <t:{int(business['created_at'].timestamp())}:D>",
         color=ACCENT
     )
@@ -291,14 +679,10 @@ class Businesses(commands.Cog):
         pool = get_pool()
         rows = await pool.fetch("SELECT id FROM businesses WHERE post_message_id IS NOT NULL")
         for row in rows:
-            view = BusinessPostView(row["id"])
-            self.bot.add_view(view)
-
-    # ── Username sync ─────────────────────────────────────────────────────────
+            self.bot.add_view(BusinessPostView(row["id"]))
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        """When a member's display name changes, update their business forum thread titles."""
         if before.display_name == after.display_name:
             return
         pool = get_pool()
@@ -308,16 +692,14 @@ class Businesses(commands.Cog):
         )
         for row in rows:
             try:
-                thread = after.guild.get_channel(row["post_thread_id"])
-                if thread is None:
-                    thread = await after.guild.fetch_channel(row["post_thread_id"])
+                thread = after.guild.get_channel(row["post_thread_id"]) or \
+                         await after.guild.fetch_channel(row["post_thread_id"])
                 if thread:
-                    new_name = _forum_thread_name(after, after.name, row["name"])
-                    await thread.edit(name=new_name)
+                    await thread.edit(name=_forum_thread_name(after, after.name, row["name"]))
             except Exception:
                 pass
 
-    # ── Admin: review applications ─────────────────────────────────────────────
+    # ── Admin: review applications ────────────────────────────────────────────
 
     @app_commands.command(name="pending_applications", description="View pending business applications.")
     async def pending_apps(self, interaction: discord.Interaction):
@@ -331,8 +713,10 @@ class Businesses(commands.Cog):
         for a in apps:
             desc += f"**#{a['id']} — {a['name']}** by <@{a['owner_id']}>\n"
             desc += f"Industry: {a['industry']}\n{a['description']}\n\n"
-        embed = styled_embed("Pending Applications", desc.strip(), color=WARNING)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(
+            embed=styled_embed("Pending Applications", desc.strip(), color=WARNING),
+            ephemeral=True
+        )
 
     @app_commands.command(name="review_application", description="Approve or reject a business application.")
     @app_commands.describe(application_id="The application ID to review")
@@ -344,29 +728,131 @@ class Businesses(commands.Cog):
             await interaction.response.send_message("Application not found.", ephemeral=True)
             return
         if app["status"] != "pending":
-            await interaction.response.send_message(
-                f"Application is already **{app['status']}**.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Application is already **{app['status']}**.", ephemeral=True)
             return
-        embed = styled_embed(
-            f"Application #{application_id}",
-            f"**{app['name']}** by <@{app['owner_id']}>\n"
-            f"Industry: {app['industry']}\n{app['description']}",
-            color=WARNING
-        )
         await interaction.response.send_message(
-            embed=embed,
+            embed=styled_embed(
+                f"Application #{application_id}",
+                f"**{app['name']}** by <@{app['owner_id']}>\n"
+                f"Industry: {app['industry']}\n{app['description']}",
+                color=WARNING
+            ),
             view=ReviewView(application_id, self.bot),
             ephemeral=True
         )
 
-    @app_commands.command(name="post_business", description="Manually re-post a business's forum thread.")
-    @app_commands.describe(business_id="The business ID")
-    async def post_business(self, interaction: discord.Interaction, business_id: int):
+    # ── Admin: review expansions ──────────────────────────────────────────────
+
+    @app_commands.command(name="pending_expansions", description="View pending expansion proposals.")
+    async def pending_expansions_cmd(self, interaction: discord.Interaction):
         if not await admin_check(interaction):
             return
-        await self._create_business_post(interaction, business_id)
-        await interaction.response.send_message("Business forum post created.", ephemeral=True)
+        proposals = await get_pending_expansions(interaction.guild_id)
+        if not proposals:
+            await interaction.response.send_message("No pending expansion proposals.", ephemeral=True)
+            return
+        pool = get_pool()
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+        sym = guild_row["currency_symbol"]
+        desc = ""
+        for p in proposals:
+            desc += f"**#{p['id']} — {p['title']}**\n"
+            desc += f"Business: {p['business_name']} | Owner: <@{p['owner_id']}>\n"
+            desc += f"Est. Revenue: {sym}{p['estimated_revenue']:,.2f}/day\n\n"
+        await interaction.response.send_message(
+            embed=styled_embed("Pending Expansion Proposals", desc.strip(), color=WARNING),
+            ephemeral=True
+        )
+
+    @app_commands.command(name="review_expansion", description="Approve, deny or modify an expansion proposal.")
+    @app_commands.describe(proposal_id="The expansion proposal ID")
+    async def review_expansion_cmd(self, interaction: discord.Interaction, proposal_id: int):
+        if not await admin_check(interaction):
+            return
+        proposal = await get_expansion(proposal_id)
+        if not proposal:
+            await interaction.response.send_message("Proposal not found.", ephemeral=True)
+            return
+        if proposal["status"] != "pending":
+            await interaction.response.send_message(f"Proposal already **{proposal['status']}**.", ephemeral=True)
+            return
+        pool = get_pool()
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+        sym = guild_row["currency_symbol"]
+        await interaction.response.send_message(
+            embed=styled_embed(
+                f"Expansion #{proposal_id}: {proposal['title']}",
+                f"**Business:** {proposal['business_name']}\n"
+                f"**Owner:** <@{proposal['owner_id']}>\n\n"
+                f"**Description:**\n{proposal['description']}\n\n"
+                f"**Estimated Revenue:** {sym}{proposal['estimated_revenue']:,.2f}/day",
+                color=WARNING
+            ),
+            view=ExpansionReviewView(proposal_id, float(proposal["estimated_revenue"]), proposal["owner_id"]),
+            ephemeral=True
+        )
+
+    # ── Admin: tax & salary config ────────────────────────────────────────────
+
+    @app_commands.command(name="set_tax_rates", description="Configure tax rates for work, salary, stocks, and dividends.")
+    @app_commands.describe(
+        tax_work="Tax % on work income (0–100)",
+        tax_salary="Tax % on CEO salary (0–100)",
+        tax_stock_profit="Tax % on stock sale profits (0–100)",
+        tax_dividend="Tax % on dividend payouts (0–100)"
+    )
+    async def set_tax_rates(self, interaction: discord.Interaction,
+                            tax_work: float = None, tax_salary: float = None,
+                            tax_stock_profit: float = None, tax_dividend: float = None):
+        if not await admin_check(interaction):
+            return
+        await ensure_guild(interaction.guild_id)
+        pool = get_pool()
+        updates = {}
+        if tax_work is not None:
+            updates["tax_rate_work"] = max(0.0, min(100.0, tax_work))
+        if tax_salary is not None:
+            updates["tax_rate_salary"] = max(0.0, min(100.0, tax_salary))
+        if tax_stock_profit is not None:
+            updates["tax_rate_stock_profit"] = max(0.0, min(100.0, tax_stock_profit))
+        if tax_dividend is not None:
+            updates["tax_rate_dividend"] = max(0.0, min(100.0, tax_dividend))
+
+        if not updates:
+            await interaction.response.send_message("No values provided.", ephemeral=True)
+            return
+
+        set_clause = ", ".join(f"{k} = ${i+1}" for i, k in enumerate(updates))
+        vals = list(updates.values()) + [interaction.guild_id]
+        await pool.execute(f"UPDATE guilds SET {set_clause} WHERE guild_id = ${len(vals)}", *vals)
+
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+        await interaction.response.send_message(embed=styled_embed(
+            "Tax Rates Updated",
+            f"**Work:** {guild_row['tax_rate_work']:.1f}%\n"
+            f"**CEO Salary:** {guild_row['tax_rate_salary']:.1f}%\n"
+            f"**Stock Profit:** {guild_row['tax_rate_stock_profit']:.1f}%\n"
+            f"**Dividend:** {guild_row['tax_rate_dividend']:.1f}%",
+            color=SUCCESS
+        ), ephemeral=True)
+
+    @app_commands.command(name="set_salary_cap", description="Set the max CEO salary as a % of total company revenue.")
+    @app_commands.describe(percent="Max salary as % of total revenue (e.g. 50 = up to 50% of revenue/day)")
+    async def set_salary_cap(self, interaction: discord.Interaction, percent: float):
+        if not await admin_check(interaction):
+            return
+        await ensure_guild(interaction.guild_id)
+        percent = max(1.0, min(100.0, percent))
+        pool = get_pool()
+        await pool.execute(
+            "UPDATE guilds SET salary_max_pct = $1 WHERE guild_id = $2",
+            percent, interaction.guild_id
+        )
+        await interaction.response.send_message(embed=styled_embed(
+            "Salary Cap Updated",
+            f"CEOs can now set their salary up to **{percent:.1f}%** of their company's total revenue per day.",
+            color=SUCCESS
+        ), ephemeral=True)
 
     # ── Internal: create forum post ───────────────────────────────────────────
 
@@ -375,44 +861,29 @@ class Businesses(commands.Cog):
         business = await get_business(business_id)
         if not business:
             return
-
         guild = interaction_or_guild.guild if hasattr(interaction_or_guild, "guild") else interaction_or_guild
         guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", guild.id)
         if not guild_row or not guild_row["business_channel_id"]:
             return
-
         channel = guild.get_channel(guild_row["business_channel_id"])
         if not channel:
             return
 
-        # Must be a ForumChannel
-        if not isinstance(channel, discord.ForumChannel):
-            # Fallback: post in regular channel (shouldn't happen after proper setup)
-            embed = await _build_business_embed(business, guild_row)
-            view = BusinessPostView(business_id)
-            msg = await channel.send(embed=embed, view=view)
-            await update_business_message(business_id, msg.id, None)
-            self.bot.add_view(view)
-            return
-
-        member = guild.get_member(business["owner_id"])
-        thread_name = _forum_thread_name(member, f"User {business['owner_id']}", business["name"])
         embed = await _build_business_embed(business, guild_row)
         view = BusinessPostView(business_id)
 
-        thread_with_msg = await channel.create_thread(
-            name=thread_name,
-            embed=embed,
-            view=view
-        )
-        thread = thread_with_msg.thread
-        msg   = thread_with_msg.message
-
-        await update_business_message(business_id, msg.id, thread.id)
+        if isinstance(channel, discord.ForumChannel):
+            member = guild.get_member(business["owner_id"])
+            thread_name = _forum_thread_name(member, f"User {business['owner_id']}", business["name"])
+            twm = await channel.create_thread(name=thread_name, embed=embed, view=view)
+            await update_business_message(business_id, twm.message.id, twm.thread.id)
+        else:
+            msg = await channel.send(embed=embed, view=view)
+            await update_business_message(business_id, msg.id, None)
         self.bot.add_view(view)
 
 
-# ── Review buttons ─────────────────────────────────────────────────────────────
+# ── Review views ──────────────────────────────────────────────────────────────
 
 class ReviewView(discord.ui.View):
     def __init__(self, app_id: int, bot: commands.Bot):
@@ -424,58 +895,38 @@ class ReviewView(discord.ui.View):
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         business = await approve_application(self.app_id)
         pool = get_pool()
-        guild_row = await pool.fetchrow(
-            "SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id
-        )
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
 
-        # Post business to forum channel
         if guild_row and guild_row["business_channel_id"]:
             channel = interaction.guild.get_channel(guild_row["business_channel_id"])
             if channel:
+                embed = await _build_business_embed(business, guild_row)
+                view = BusinessPostView(business["id"])
                 if isinstance(channel, discord.ForumChannel):
                     member = interaction.guild.get_member(business["owner_id"])
-                    thread_name = _forum_thread_name(
-                        member, f"User {business['owner_id']}", business["name"]
-                    )
-                    embed = await _build_business_embed(business, guild_row)
-                    view = BusinessPostView(business["id"])
-                    thread_with_msg = await channel.create_thread(
-                        name=thread_name, embed=embed, view=view
-                    )
-                    thread = thread_with_msg.thread
-                    msg   = thread_with_msg.message
-                    await update_business_message(business["id"], msg.id, thread.id)
-                    self.bot.add_view(view)
+                    thread_name = _forum_thread_name(member, f"User {business['owner_id']}", business["name"])
+                    twm = await channel.create_thread(name=thread_name, embed=embed, view=view)
+                    await update_business_message(business["id"], twm.message.id, twm.thread.id)
                 else:
-                    # Fallback for non-forum channels
-                    embed = await _build_business_embed(business, guild_row)
-                    view = BusinessPostView(business["id"])
                     msg = await channel.send(embed=embed, view=view)
                     await update_business_message(business["id"], msg.id, None)
-                    self.bot.add_view(view)
+                self.bot.add_view(view)
 
-        # Notify applicant
         try:
             member = interaction.guild.get_member(business["owner_id"])
             if member:
-                await member.send(
-                    embed=styled_embed(
-                        "Business Approved",
-                        f"Your business **{business['name']}** has been approved!\n\n"
-                        f"It's currently **private**. You can launch an IPO from the business post "
-                        f"to list it on the stock market when you're ready.",
-                        color=SUCCESS
-                    )
-                )
+                await member.send(embed=styled_embed(
+                    "Business Approved ✅",
+                    f"**{business['name']}** has been approved!\n\n"
+                    f"It starts **private**. Use **Set Salary** to configure your CEO salary, "
+                    f"then **Claim Salary** daily. Launch an IPO when you're ready to go public.",
+                    color=SUCCESS
+                ))
         except Exception:
             pass
 
         await interaction.response.edit_message(
-            embed=styled_embed(
-                "Approved",
-                f"Business **{business['name']}** is now live (private).",
-                color=SUCCESS
-            ),
+            embed=styled_embed("Approved", f"**{business['name']}** is now live.", color=SUCCESS),
             view=None
         )
 
@@ -486,18 +937,113 @@ class ReviewView(discord.ui.View):
         try:
             member = interaction.guild.get_member(app["owner_id"])
             if member:
-                await member.send(
-                    embed=styled_embed(
-                        "Business Rejected",
-                        f"Your application for **{app['name']}** was not approved.",
-                        color=DANGER
-                    )
-                )
+                await member.send(embed=styled_embed(
+                    "Business Rejected",
+                    f"Your application for **{app['name']}** was not approved.",
+                    color=DANGER
+                ))
         except Exception:
             pass
         await interaction.response.edit_message(
-            embed=styled_embed("Rejected", "Application rejected.", color=DANGER),
-            view=None
+            embed=styled_embed("Rejected", "Application rejected.", color=DANGER), view=None
+        )
+
+
+class ExpansionReviewView(discord.ui.View):
+    def __init__(self, proposal_id: int, estimated_revenue: float, owner_id: int):
+        super().__init__(timeout=180)
+        self.proposal_id = proposal_id
+        self.estimated_revenue = estimated_revenue
+        self.owner_id = owner_id
+
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success)
+    async def approve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            ExpansionDecisionModal(self.proposal_id, "approved", self.estimated_revenue, self.owner_id)
+        )
+
+    @discord.ui.button(label="✏️ Modify & Approve", style=discord.ButtonStyle.primary)
+    async def modify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            ExpansionDecisionModal(self.proposal_id, "modified", self.estimated_revenue, self.owner_id)
+        )
+
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger)
+    async def deny_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            ExpansionDecisionModal(self.proposal_id, "denied", self.estimated_revenue, self.owner_id)
+        )
+
+
+class ExpansionDecisionModal(discord.ui.Modal, title="Expansion Decision"):
+    reason = discord.ui.TextInput(
+        label="Roleplay Reason / Admin Note",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explain your decision in roleplay terms...",
+        max_length=500
+    )
+    revenue_override = discord.ui.TextInput(
+        label="Revenue Increase (leave blank to use estimate or 0 to deny)",
+        placeholder="e.g. 300  (only used for approve/modify)",
+        required=False,
+        max_length=16
+    )
+
+    def __init__(self, proposal_id: int, decision: str, estimated_revenue: float, owner_id: int):
+        super().__init__()
+        self.proposal_id = proposal_id
+        self.decision = decision
+        self.estimated_revenue = estimated_revenue
+        self.owner_id = owner_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        approved_rev = None
+        if self.decision in ("approved", "modified"):
+            rev_str = self.revenue_override.value.strip()
+            if rev_str:
+                try:
+                    approved_rev = float(rev_str.replace(",", ""))
+                except ValueError:
+                    await interaction.followup.send("Invalid revenue amount.", ephemeral=True)
+                    return
+            else:
+                approved_rev = self.estimated_revenue
+
+        final_status = "approved" if self.decision != "denied" else "denied"
+        await resolve_expansion(self.proposal_id, final_status, self.reason.value, approved_rev)
+
+        pool = get_pool()
+        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+        sym = guild_row["currency_symbol"]
+
+        # Notify owner
+        try:
+            member = interaction.guild.get_member(self.owner_id)
+            if member:
+                proposal = await get_expansion(self.proposal_id)
+                if final_status == "approved":
+                    msg_body = (
+                        f"Your expansion **{proposal['title']}** was **approved**!\n\n"
+                        f"**Revenue Added:** {sym}{approved_rev:,.2f}\n\n"
+                        f"**Admin Note:** _{self.reason.value}_"
+                    )
+                    color = SUCCESS
+                else:
+                    msg_body = (
+                        f"Your expansion **{proposal['title']}** was **denied**.\n\n"
+                        f"**Admin Note:** _{self.reason.value}_"
+                    )
+                    color = DANGER
+                await member.send(embed=styled_embed("Expansion Decision", msg_body, color=color))
+        except Exception:
+            pass
+
+        result_text = f"approved (+{sym}{approved_rev:,.2f})" if final_status == "approved" else "denied"
+        await interaction.followup.send(
+            embed=styled_embed("Decision Recorded", f"Proposal #{self.proposal_id} {result_text}.", color=SUCCESS),
+            ephemeral=True
         )
 
 
