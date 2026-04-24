@@ -1675,6 +1675,365 @@ class CrashView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SETUP
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Maps keywords → canonical game name  (defined here so _BetPromptView etc. can reference them)
+GAME_KEYWORDS: dict[str, str] = {
+    "coinflip": "coinflip", "coin flip": "coinflip", "coin": "coinflip",
+    "dice": "dice",
+    "hilo": "hilo", "hi-lo": "hilo", "hi lo": "hilo", "hilow": "hilo",
+    "keno": "keno",
+    "wheel": "wheel", "wheel of fortune": "wheel",
+    "blackjack": "blackjack", "black jack": "blackjack", "bj": "blackjack",
+    "baccarat": "baccarat", "bac": "baccarat",
+    "threecardpoker": "threecardpoker", "three card poker": "threecardpoker",
+    "threecard": "threecardpoker", "3 card poker": "threecardpoker",
+    "pickanumber": "pickanumber", "pick a number": "pickanumber",
+    "picknumber": "pickanumber", "pick number": "pickanumber",
+    "horserace": "horserace", "horse race": "horserace", "horses": "horserace",
+    "horseracing": "horserace", "horse racing": "horserace",
+    "slots": "slots", "slot": "slots", "slot machine": "slots",
+    "minesweeper": "minesweeper", "mines": "minesweeper",
+    "war": "war",
+    "crash": "crash",
+}
+
+
+def _parse_game_and_bet(content: str) -> tuple[str | None, float | None]:
+    """
+    Parse a message into (game_name, bet_or_None).
+    Handles: 'slots', 'slots 500', 'i want to play slots 500', 'slots, 1000' etc.
+    """
+    text = content.lower().strip()
+    # Strip common preamble
+    for prefix in ("i want to play ", "play ", "let me play ", "i'd like to play ",
+                   "i'll play ", "lets play ", "let's play "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+
+    # Try to pull a trailing number (the bet)
+    bet: float | None = None
+    import re
+    m = re.search(r'[\s,]+([0-9][0-9,]*(?:\.[0-9]+)?)[\s]*$', text)
+    if m:
+        try:
+            bet = float(m.group(1).replace(",", ""))
+            text = text[:m.start()].strip()
+        except ValueError:
+            bet = None
+
+    # Match game keyword (longest match first to handle multi-word names)
+    matched_game: str | None = None
+    for keyword in sorted(GAME_KEYWORDS, key=len, reverse=True):
+        if keyword in text:
+            matched_game = GAME_KEYWORDS[keyword]
+            break
+
+    return matched_game, bet
+
+
+class BetModal(discord.ui.Modal):
+    bet_input = discord.ui.TextInput(
+        label="Your Bet (chips)",
+        placeholder="e.g. 500",
+        max_length=20
+    )
+
+    def __init__(self, game: str, bot: commands.Bot):
+        super().__init__(title=f"Place Your Bet — {game.title()}")
+        self.game = game
+        self.bot  = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            bet = float(self.bet_input.value.replace(",", ""))
+            if bet <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(
+                "Please enter a valid positive number.", ephemeral=True
+            )
+            return
+        await _launch_game(interaction, self.game, bet)
+
+
+async def _launch_game(interaction: discord.Interaction, game: str, bet: float):
+    """Run all guards then launch the named game."""
+    settings = await casino_guard(interaction, bet)
+    if not settings:
+        return
+
+    if game == "coinflip":
+        embed = neutral_embed("🪙 Coinflip",
+            f"{interaction.user.mention} placed a bet of **{bet:,.2f}** chips.\n\nHeads or Tails?")
+        await interaction.response.send_message(embed=embed, view=CoinflipView(bet, settings))
+
+    elif game == "dice":
+        embed = neutral_embed("🎲 Dice Roll",
+            f"{interaction.user.mention} placed a bet of **{bet:,.2f}** chips.\n\n"
+            "Will the die land **Over 3** (4–6) or **Under 4** (1–3)?\nPays **1.8x** on win.")
+        await interaction.response.send_message(embed=embed, view=DiceView(bet, settings))
+
+    elif game == "hilo":
+        card = random.choice(CARD_NAMES)
+        embed = neutral_embed("🃏 Hi-Lo",
+            f"{interaction.user.mention} placed a bet of **{bet:,.2f}** chips.\n\n"
+            f"**Current Card:** {card}\n\n"
+            "Is the next card Higher or Lower? Each correct guess multiplies your winnings by **1.9x** (up to 5 chains).")
+        await interaction.response.send_message(embed=embed, view=HiLoView(bet, settings, card))
+
+    elif game == "keno":
+        await interaction.response.send_modal(KenoModal(bet, settings))
+
+    elif game == "wheel":
+        segment, mult = spin_wheel()
+        final_idx = WHEEL_DISPLAY_ORDER.index(segment)
+        spin_embed = neutral_embed("🌀 Wheel of Fortune — Spinning...",
+            f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n{wheel_art(0)}\n*🌀 The wheel is spinning...*")
+        await interaction.response.send_message(embed=spin_embed)
+        message = await interaction.original_response()
+        n = len(WHEEL_DISPLAY_ORDER)
+        spin_sequence = list(range(n)) * 2 + list(range(final_idx + 1))
+        delays = [0.15] * (len(spin_sequence) - 6) + [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
+        delays = delays[-len(spin_sequence):]
+        while len(delays) < len(spin_sequence):
+            delays.insert(0, 0.15)
+        for i, (ptr, delay) in enumerate(zip(spin_sequence, delays)):
+            await asyncio.sleep(delay)
+            lbl = "🌀 Slowing down..." if i > len(spin_sequence) - 5 else "🌀 Spinning..."
+            try:
+                await message.edit(embed=neutral_embed("🌀 Wheel of Fortune — Spinning...",
+                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n{wheel_art(ptr)}\n*{lbl}*"))
+            except Exception:
+                break
+        await asyncio.sleep(0.5)
+        if mult == 0.0:
+            await apply_loss(interaction, bet)
+            chips = await get_chips(interaction.guild_id, interaction.user.id)
+            embed = lose_embed("🌀 Wheel of Fortune — BUST! 💀",
+                f"{interaction.user.mention}\n\n{wheel_art(final_idx, highlight=segment)}\n"
+                f"The wheel landed on **{segment}**!\n\n**Lost:** {bet:,.2f} chips\n**Balance:** {chips:,.2f} chips")
+        else:
+            gross = bet * mult
+            net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
+            chips = await get_chips(interaction.guild_id, interaction.user.id)
+            embed = win_embed(f"🌀 Wheel of Fortune — {segment}! 🎉",
+                f"{interaction.user.mention}\n\n{wheel_art(final_idx, highlight=segment)}\n"
+                f"The wheel landed on **{segment}**!\n\n**Multiplier:** {mult}x\n"
+                f"**Gross Win:** {gross:,.2f} chips\n**Tax:** {tax:,.2f} chips\n"
+                f"**Net Win:** +{net:,.2f} chips\n**Balance:** {chips:,.2f} chips")
+        try:
+            await message.edit(embed=embed)
+        except Exception:
+            pass
+
+    elif game == "blackjack":
+        deck = DECK.copy(); random.shuffle(deck)
+        player = [deck.pop(), deck.pop()]; dealer = [deck.pop(), deck.pop()]
+        deal_embed = neutral_embed("🃏 Blackjack — Dealing...",
+            f"**Your Hand:** 🂠\n**Dealer Shows:** 🂠\n\nBet: **{bet:,.2f}** chips\n*Shuffling and dealing...*")
+        await interaction.response.send_message(embed=deal_embed)
+        message = await interaction.original_response()
+        for ph, dh, lbl in [
+            ("🂠  🂠", "🂠", "*Dealing...*"),
+            (f"{player[0]}  🂠", "🂠", "*Dealing...*"),
+            (f"{player[0]}  🂠", f"{dealer[0]}", "*Dealer's card...*"),
+            (f"{player[0]}  {player[1]}", f"{dealer[0]}", "*Your second card...*"),
+        ]:
+            await asyncio.sleep(0.3)
+            try:
+                await message.edit(embed=neutral_embed("🃏 Blackjack — Dealing...",
+                    f"**Your Hand:** {ph}\n**Dealer Shows:** {dh}  +  🂠\n\nBet: **{bet:,.2f}** chips\n*{lbl}*"))
+            except Exception:
+                break
+        await asyncio.sleep(0.3)
+        view = BlackjackView(bet, settings, player, dealer, deck)
+        try:
+            await message.edit(embed=view.build_embed(), view=view)
+        except Exception:
+            pass
+
+    elif game == "baccarat":
+        embed = neutral_embed("🎴 Baccarat",
+            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\nBet on **Player** (2x), **Banker** (1.95x), or **Tie** (8x).")
+        await interaction.response.send_message(embed=embed, view=BaccaratView(bet, settings))
+
+    elif game == "threecardpoker":
+        deck = DECK.copy(); random.shuffle(deck)
+        ph = [deck.pop(), deck.pop(), deck.pop()]; dh = [deck.pop(), deck.pop(), deck.pop()]
+        embed = neutral_embed("🃏 Three Card Poker",
+            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\n"
+            f"**Your Hand:** {bj_hand_str(ph)}\n**Dealer:** 🂠 🂠 🂠\n\nPlay or Fold?")
+        await interaction.response.send_message(embed=embed, view=ThreeCardPokerView(bet, settings, ph, dh))
+
+    elif game == "pickanumber":
+        embed = neutral_embed("🎯 Pick a Number",
+            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\nPick a number from **1 to 10**. Exact match pays **8x**!")
+        await interaction.response.send_message(embed=embed, view=PickNumberView(bet, settings))
+
+    elif game == "horserace":
+        horses_str = "\n".join(f"**{n}** — {o}x" for n, o, _ in HORSES)
+        embed = neutral_embed("🐎 Horse Racing",
+            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\n**The Field:**\n{horses_str}\n\nPick your horse!")
+        await interaction.response.send_message(embed=embed, view=HorseRacingView(bet, settings))
+
+    elif game == "slots":
+        reels, mult = spin_slots()
+        spin_embed = neutral_embed("🎰 Slots — Spinning...",
+            f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+            f"{slot_display('❓', '❓', '❓', [True, True, True])}\n*🎰 Pulling the lever...*")
+        await interaction.response.send_message(embed=spin_embed)
+        message = await interaction.original_response()
+        for _ in range(8):
+            await asyncio.sleep(0.18)
+            try:
+                await message.edit(embed=neutral_embed("🎰 Slots — Spinning...",
+                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+                    f"{slot_display('❓','❓','❓',[True,True,True])}\n*🌀 Spinning...*"))
+            except Exception: break
+        for delay in [0.22, 0.27, 0.32, 0.38, 0.44]:
+            await asyncio.sleep(delay)
+            try:
+                await message.edit(embed=neutral_embed("🎰 Slots — Spinning...",
+                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+                    f"{slot_display('❓','❓','❓',[True,True,True])}\n*🌀 Slowing down...*"))
+            except Exception: break
+        for spinning_flags, r1, r2, r3, lbl, delay in [
+            ([False,True,True],  reels[0],"❓","❓",      f"*⏸ {reels[0]} — first reel locked!*",  0.55),
+            ([False,False,True], reels[0],reels[1],"❓", f"*⏸ {reels[1]} — second reel locked!*", 0.65),
+        ]:
+            await asyncio.sleep(delay)
+            try:
+                await message.edit(embed=neutral_embed("🎰 Slots — Spinning...",
+                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+                    f"{slot_display(r1,r2,r3,spinning_flags)}\n{lbl}"))
+            except Exception: break
+        await asyncio.sleep(0.75)
+        if mult == 0.0:
+            await apply_loss(interaction, bet)
+            chips = await get_chips(interaction.guild_id, interaction.user.id)
+            embed = lose_embed("🎰 Slots — No Match",
+                f"{interaction.user.mention}\n\n{slot_display(reels[0],reels[1],reels[2])}\n\n"
+                f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips")
+        else:
+            gross = bet * mult
+            net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
+            chips = await get_chips(interaction.guild_id, interaction.user.id)
+            lbl2 = "🎰 Slots — JACKPOT! 🎉" if mult == 50.0 else f"🎰 Slots — {mult}x!"
+            embed = win_embed(lbl2,
+                f"{interaction.user.mention}\n\n{slot_display(reels[0],reels[1],reels[2])}\n\n"
+                f"**Multiplier:** {mult}x\n**Gross Win:** {gross:,.2f} chips\n**Tax:** {tax:,.2f} chips\n"
+                f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips")
+        try:
+            await message.edit(embed=embed)
+        except Exception: pass
+
+    elif game == "minesweeper":
+        mines = set(random.sample(range(MINE_GRID), MINE_COUNT))
+        embed = neutral_embed("💣 Minesweeper",
+            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\n"
+            f"**Grid:** 4×4  |  **Mines:** {MINE_COUNT}\n"
+            f"Each safe tile multiplies your bet by **{MINE_MULTI}x**. Cash out anytime!")
+        await interaction.response.send_message(embed=embed, view=MinesweeperView(bet, settings, mines, set()))
+
+    elif game == "war":
+        deck = DECK.copy(); random.shuffle(deck)
+        pc, dc = deck.pop(), deck.pop()
+        pv, dv = CARD_VALUES[pc], CARD_VALUES[dc]
+        draw_embed = neutral_embed("🃏 War — Drawing Cards...",
+            f"{interaction.user.mention}\n\n**Your Card:** 🂠\n**Dealer:** 🂠\n\nBet: **{bet:,.2f}** chips\n*Both players draw...*")
+        await interaction.response.send_message(embed=draw_embed)
+        message = await interaction.original_response()
+        await asyncio.sleep(0.5)
+        try:
+            await message.edit(embed=neutral_embed("🃏 War — Revealing...",
+                f"{interaction.user.mention}\n\n**Your Card:** **{pc}**\n**Dealer:** 🂠\n\n*Dealer flips...*"))
+        except Exception: pass
+        await asyncio.sleep(0.55)
+        if pv != dv:
+            won = pv > dv
+            if won:
+                gross = bet * 2; net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
+                chips = await get_chips(interaction.guild_id, interaction.user.id)
+                embed = win_embed("🃏 War — You Win!",
+                    f"{interaction.user.mention}\n\n**Your Card:** {pc}  vs  **Dealer:** {dc}\n\n"
+                    f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips")
+            else:
+                await apply_loss(interaction, bet)
+                chips = await get_chips(interaction.guild_id, interaction.user.id)
+                embed = lose_embed("🃏 War — Dealer Wins",
+                    f"{interaction.user.mention}\n\n**Your Card:** {pc}  vs  **Dealer:** {dc}\n\n"
+                    f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips")
+            try:
+                await message.edit(embed=embed)
+            except Exception: pass
+        else:
+            try:
+                await message.edit(embed=neutral_embed("🃏 War — It's a Tie! ⚔️",
+                    f"{interaction.user.mention}\n\nBoth drew **{pc}**! You may go to **War** (double or bust) or **Surrender**."),
+                    view=WarView(bet, settings, pc, dc))
+            except Exception: pass
+
+    elif game == "crash":
+        crash_point = generate_crash_point()
+        if crash_point <= 1.0:
+            await apply_loss(interaction, bet)
+            chips = await get_chips(interaction.guild_id, interaction.user.id)
+            embed = lose_embed("💥 Crash — Instant Bust!",
+                f"{interaction.user.mention} — The market crashed immediately!\n\n"
+                f"**Crash Point:** {crash_point:.2f}x\n**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips")
+            await interaction.response.send_message(embed=embed)
+            return
+        countdown_embed = neutral_embed("💥 Crash — Launching...",
+            f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n🚀  **3...**\n\nCash out before the crash!")
+        await interaction.response.send_message(embed=countdown_embed)
+        message = await interaction.original_response()
+        for count, lbl in [("2...", "🚀"), ("1...", "🔥"), ("🚀 LAUNCH!", "💥")]:
+            await asyncio.sleep(0.6)
+            try:
+                await message.edit(embed=neutral_embed("💥 Crash — Launching...",
+                    f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n{lbl}  **{count}**\n\nCash out before the crash!"))
+            except Exception: break
+        await asyncio.sleep(0.4)
+        view = CrashView(bet, settings, crash_point, current=1.0)
+        try:
+            await message.edit(embed=neutral_embed("💥 Crash — In Progress",
+                f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n**Multiplier:** 1.00x ⬆️\n\nCash out before the crash!"),
+                view=view)
+        except Exception: pass
+        current = 1.0
+        while current < crash_point and not view.cashed_out:
+            await asyncio.sleep(1.5)
+            current = round(current * random.uniform(1.05, 1.20), 2)
+            current = min(current, crash_point)
+            view.current = current
+            if view.cashed_out: break
+            try:
+                await message.edit(embed=neutral_embed("💥 Crash — In Progress",
+                    f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n**Multiplier:** {current:.2f}x ⬆️\n\nCash out before the crash!"),
+                    view=view)
+            except Exception: break
+        if not view.cashed_out:
+            view.crashed = True
+            for item in view.children: item.disabled = True
+            await apply_loss(interaction, bet)
+            chips = await get_chips(interaction.guild_id, interaction.user.id)
+            try:
+                await message.edit(embed=lose_embed(f"💥 Crash — CRASHED at {crash_point:.2f}x!",
+                    f"{interaction.user.mention} didn't cash out in time!\n\n"
+                    f"**Crash Point:** {crash_point:.2f}x\n**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips"),
+                    view=view)
+            except Exception: pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SETUP
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 class _BetPromptView(discord.ui.View):
     """Shown when user typed a game name with no bet — prompts them to enter one."""
     def __init__(self, game: str):
@@ -2456,363 +2815,6 @@ class HousePotWithdrawView(discord.ui.View):
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MESSAGE-BASED GAME TRIGGERING
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Maps keywords → canonical game name
-GAME_KEYWORDS: dict[str, str] = {
-    "coinflip": "coinflip", "coin flip": "coinflip", "coin": "coinflip",
-    "dice": "dice",
-    "hilo": "hilo", "hi-lo": "hilo", "hi lo": "hilo", "hilow": "hilo",
-    "keno": "keno",
-    "wheel": "wheel", "wheel of fortune": "wheel",
-    "blackjack": "blackjack", "black jack": "blackjack", "bj": "blackjack",
-    "baccarat": "baccarat", "bac": "baccarat",
-    "threecardpoker": "threecardpoker", "three card poker": "threecardpoker",
-    "threecard": "threecardpoker", "3 card poker": "threecardpoker",
-    "pickanumber": "pickanumber", "pick a number": "pickanumber",
-    "picknumber": "pickanumber", "pick number": "pickanumber",
-    "horserace": "horserace", "horse race": "horserace", "horses": "horserace",
-    "horseracing": "horserace", "horse racing": "horserace",
-    "slots": "slots", "slot": "slots", "slot machine": "slots",
-    "minesweeper": "minesweeper", "mines": "minesweeper",
-    "war": "war",
-    "crash": "crash",
-}
-
-
-def _parse_game_and_bet(content: str) -> tuple[str | None, float | None]:
-    """
-    Parse a message into (game_name, bet_or_None).
-    Handles: 'slots', 'slots 500', 'i want to play slots 500', 'slots, 1000' etc.
-    """
-    text = content.lower().strip()
-    # Strip common preamble
-    for prefix in ("i want to play ", "play ", "let me play ", "i'd like to play ",
-                   "i'll play ", "lets play ", "let's play "):
-        if text.startswith(prefix):
-            text = text[len(prefix):]
-            break
-
-    # Try to pull a trailing number (the bet)
-    bet: float | None = None
-    import re
-    m = re.search(r'[\s,]+([0-9][0-9,]*(?:\.[0-9]+)?)[\s]*$', text)
-    if m:
-        try:
-            bet = float(m.group(1).replace(",", ""))
-            text = text[:m.start()].strip()
-        except ValueError:
-            bet = None
-
-    # Match game keyword (longest match first to handle multi-word names)
-    matched_game: str | None = None
-    for keyword in sorted(GAME_KEYWORDS, key=len, reverse=True):
-        if keyword in text:
-            matched_game = GAME_KEYWORDS[keyword]
-            break
-
-    return matched_game, bet
-
-
-class BetModal(discord.ui.Modal):
-    bet_input = discord.ui.TextInput(
-        label="Your Bet (chips)",
-        placeholder="e.g. 500",
-        max_length=20
-    )
-
-    def __init__(self, game: str, bot: commands.Bot):
-        super().__init__(title=f"Place Your Bet — {game.title()}")
-        self.game = game
-        self.bot  = bot
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            bet = float(self.bet_input.value.replace(",", ""))
-            if bet <= 0:
-                raise ValueError
-        except ValueError:
-            await interaction.response.send_message(
-                "Please enter a valid positive number.", ephemeral=True
-            )
-            return
-        await _launch_game(interaction, self.game, bet)
-
-
-async def _launch_game(interaction: discord.Interaction, game: str, bet: float):
-    """Run all guards then launch the named game."""
-    settings = await casino_guard(interaction, bet)
-    if not settings:
-        return
-
-    if game == "coinflip":
-        embed = neutral_embed("🪙 Coinflip",
-            f"{interaction.user.mention} placed a bet of **{bet:,.2f}** chips.\n\nHeads or Tails?")
-        await interaction.response.send_message(embed=embed, view=CoinflipView(bet, settings))
-
-    elif game == "dice":
-        embed = neutral_embed("🎲 Dice Roll",
-            f"{interaction.user.mention} placed a bet of **{bet:,.2f}** chips.\n\n"
-            "Will the die land **Over 3** (4–6) or **Under 4** (1–3)?\nPays **1.8x** on win.")
-        await interaction.response.send_message(embed=embed, view=DiceView(bet, settings))
-
-    elif game == "hilo":
-        card = random.choice(CARD_NAMES)
-        embed = neutral_embed("🃏 Hi-Lo",
-            f"{interaction.user.mention} placed a bet of **{bet:,.2f}** chips.\n\n"
-            f"**Current Card:** {card}\n\n"
-            "Is the next card Higher or Lower? Each correct guess multiplies your winnings by **1.9x** (up to 5 chains).")
-        await interaction.response.send_message(embed=embed, view=HiLoView(bet, settings, card))
-
-    elif game == "keno":
-        await interaction.response.send_modal(KenoModal(bet, settings))
-
-    elif game == "wheel":
-        segment, mult = spin_wheel()
-        final_idx = WHEEL_DISPLAY_ORDER.index(segment)
-        spin_embed = neutral_embed("🌀 Wheel of Fortune — Spinning...",
-            f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n{wheel_art(0)}\n*🌀 The wheel is spinning...*")
-        await interaction.response.send_message(embed=spin_embed)
-        message = await interaction.original_response()
-        n = len(WHEEL_DISPLAY_ORDER)
-        spin_sequence = list(range(n)) * 2 + list(range(final_idx + 1))
-        delays = [0.15] * (len(spin_sequence) - 6) + [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
-        delays = delays[-len(spin_sequence):]
-        while len(delays) < len(spin_sequence):
-            delays.insert(0, 0.15)
-        for i, (ptr, delay) in enumerate(zip(spin_sequence, delays)):
-            await asyncio.sleep(delay)
-            lbl = "🌀 Slowing down..." if i > len(spin_sequence) - 5 else "🌀 Spinning..."
-            try:
-                await message.edit(embed=neutral_embed("🌀 Wheel of Fortune — Spinning...",
-                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n{wheel_art(ptr)}\n*{lbl}*"))
-            except Exception:
-                break
-        await asyncio.sleep(0.5)
-        if mult == 0.0:
-            await apply_loss(interaction, bet)
-            chips = await get_chips(interaction.guild_id, interaction.user.id)
-            embed = lose_embed("🌀 Wheel of Fortune — BUST! 💀",
-                f"{interaction.user.mention}\n\n{wheel_art(final_idx, highlight=segment)}\n"
-                f"The wheel landed on **{segment}**!\n\n**Lost:** {bet:,.2f} chips\n**Balance:** {chips:,.2f} chips")
-        else:
-            gross = bet * mult
-            net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
-            chips = await get_chips(interaction.guild_id, interaction.user.id)
-            embed = win_embed(f"🌀 Wheel of Fortune — {segment}! 🎉",
-                f"{interaction.user.mention}\n\n{wheel_art(final_idx, highlight=segment)}\n"
-                f"The wheel landed on **{segment}**!\n\n**Multiplier:** {mult}x\n"
-                f"**Gross Win:** {gross:,.2f} chips\n**Tax:** {tax:,.2f} chips\n"
-                f"**Net Win:** +{net:,.2f} chips\n**Balance:** {chips:,.2f} chips")
-        try:
-            await message.edit(embed=embed)
-        except Exception:
-            pass
-
-    elif game == "blackjack":
-        deck = DECK.copy(); random.shuffle(deck)
-        player = [deck.pop(), deck.pop()]; dealer = [deck.pop(), deck.pop()]
-        deal_embed = neutral_embed("🃏 Blackjack — Dealing...",
-            f"**Your Hand:** 🂠\n**Dealer Shows:** 🂠\n\nBet: **{bet:,.2f}** chips\n*Shuffling and dealing...*")
-        await interaction.response.send_message(embed=deal_embed)
-        message = await interaction.original_response()
-        for ph, dh, lbl in [
-            ("🂠  🂠", "🂠", "*Dealing...*"),
-            (f"{player[0]}  🂠", "🂠", "*Dealing...*"),
-            (f"{player[0]}  🂠", f"{dealer[0]}", "*Dealer's card...*"),
-            (f"{player[0]}  {player[1]}", f"{dealer[0]}", "*Your second card...*"),
-        ]:
-            await asyncio.sleep(0.3)
-            try:
-                await message.edit(embed=neutral_embed("🃏 Blackjack — Dealing...",
-                    f"**Your Hand:** {ph}\n**Dealer Shows:** {dh}  +  🂠\n\nBet: **{bet:,.2f}** chips\n*{lbl}*"))
-            except Exception:
-                break
-        await asyncio.sleep(0.3)
-        view = BlackjackView(bet, settings, player, dealer, deck)
-        try:
-            await message.edit(embed=view.build_embed(), view=view)
-        except Exception:
-            pass
-
-    elif game == "baccarat":
-        embed = neutral_embed("🎴 Baccarat",
-            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\nBet on **Player** (2x), **Banker** (1.95x), or **Tie** (8x).")
-        await interaction.response.send_message(embed=embed, view=BaccaratView(bet, settings))
-
-    elif game == "threecardpoker":
-        deck = DECK.copy(); random.shuffle(deck)
-        ph = [deck.pop(), deck.pop(), deck.pop()]; dh = [deck.pop(), deck.pop(), deck.pop()]
-        embed = neutral_embed("🃏 Three Card Poker",
-            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\n"
-            f"**Your Hand:** {bj_hand_str(ph)}\n**Dealer:** 🂠 🂠 🂠\n\nPlay or Fold?")
-        await interaction.response.send_message(embed=embed, view=ThreeCardPokerView(bet, settings, ph, dh))
-
-    elif game == "pickanumber":
-        embed = neutral_embed("🎯 Pick a Number",
-            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\nPick a number from **1 to 10**. Exact match pays **8x**!")
-        await interaction.response.send_message(embed=embed, view=PickNumberView(bet, settings))
-
-    elif game == "horserace":
-        horses_str = "\n".join(f"**{n}** — {o}x" for n, o, _ in HORSES)
-        embed = neutral_embed("🐎 Horse Racing",
-            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\n**The Field:**\n{horses_str}\n\nPick your horse!")
-        await interaction.response.send_message(embed=embed, view=HorseRacingView(bet, settings))
-
-    elif game == "slots":
-        reels, mult = spin_slots()
-        spin_embed = neutral_embed("🎰 Slots — Spinning...",
-            f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
-            f"{slot_display('❓', '❓', '❓', [True, True, True])}\n*🎰 Pulling the lever...*")
-        await interaction.response.send_message(embed=spin_embed)
-        message = await interaction.original_response()
-        for _ in range(8):
-            await asyncio.sleep(0.18)
-            try:
-                await message.edit(embed=neutral_embed("🎰 Slots — Spinning...",
-                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
-                    f"{slot_display('❓','❓','❓',[True,True,True])}\n*🌀 Spinning...*"))
-            except Exception: break
-        for delay in [0.22, 0.27, 0.32, 0.38, 0.44]:
-            await asyncio.sleep(delay)
-            try:
-                await message.edit(embed=neutral_embed("🎰 Slots — Spinning...",
-                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
-                    f"{slot_display('❓','❓','❓',[True,True,True])}\n*🌀 Slowing down...*"))
-            except Exception: break
-        for spinning_flags, r1, r2, r3, lbl, delay in [
-            ([False,True,True],  reels[0],"❓","❓",      f"*⏸ {reels[0]} — first reel locked!*",  0.55),
-            ([False,False,True], reels[0],reels[1],"❓", f"*⏸ {reels[1]} — second reel locked!*", 0.65),
-        ]:
-            await asyncio.sleep(delay)
-            try:
-                await message.edit(embed=neutral_embed("🎰 Slots — Spinning...",
-                    f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
-                    f"{slot_display(r1,r2,r3,spinning_flags)}\n{lbl}"))
-            except Exception: break
-        await asyncio.sleep(0.75)
-        if mult == 0.0:
-            await apply_loss(interaction, bet)
-            chips = await get_chips(interaction.guild_id, interaction.user.id)
-            embed = lose_embed("🎰 Slots — No Match",
-                f"{interaction.user.mention}\n\n{slot_display(reels[0],reels[1],reels[2])}\n\n"
-                f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips")
-        else:
-            gross = bet * mult
-            net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
-            chips = await get_chips(interaction.guild_id, interaction.user.id)
-            lbl2 = "🎰 Slots — JACKPOT! 🎉" if mult == 50.0 else f"🎰 Slots — {mult}x!"
-            embed = win_embed(lbl2,
-                f"{interaction.user.mention}\n\n{slot_display(reels[0],reels[1],reels[2])}\n\n"
-                f"**Multiplier:** {mult}x\n**Gross Win:** {gross:,.2f} chips\n**Tax:** {tax:,.2f} chips\n"
-                f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips")
-        try:
-            await message.edit(embed=embed)
-        except Exception: pass
-
-    elif game == "minesweeper":
-        mines = set(random.sample(range(MINE_GRID), MINE_COUNT))
-        embed = neutral_embed("💣 Minesweeper",
-            f"{interaction.user.mention} placed **{bet:,.2f}** chips.\n\n"
-            f"**Grid:** 4×4  |  **Mines:** {MINE_COUNT}\n"
-            f"Each safe tile multiplies your bet by **{MINE_MULTI}x**. Cash out anytime!")
-        await interaction.response.send_message(embed=embed, view=MinesweeperView(bet, settings, mines, set()))
-
-    elif game == "war":
-        deck = DECK.copy(); random.shuffle(deck)
-        pc, dc = deck.pop(), deck.pop()
-        pv, dv = CARD_VALUES[pc], CARD_VALUES[dc]
-        draw_embed = neutral_embed("🃏 War — Drawing Cards...",
-            f"{interaction.user.mention}\n\n**Your Card:** 🂠\n**Dealer:** 🂠\n\nBet: **{bet:,.2f}** chips\n*Both players draw...*")
-        await interaction.response.send_message(embed=draw_embed)
-        message = await interaction.original_response()
-        await asyncio.sleep(0.5)
-        try:
-            await message.edit(embed=neutral_embed("🃏 War — Revealing...",
-                f"{interaction.user.mention}\n\n**Your Card:** **{pc}**\n**Dealer:** 🂠\n\n*Dealer flips...*"))
-        except Exception: pass
-        await asyncio.sleep(0.55)
-        if pv != dv:
-            won = pv > dv
-            if won:
-                gross = bet * 2; net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
-                chips = await get_chips(interaction.guild_id, interaction.user.id)
-                embed = win_embed("🃏 War — You Win!",
-                    f"{interaction.user.mention}\n\n**Your Card:** {pc}  vs  **Dealer:** {dc}\n\n"
-                    f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips")
-            else:
-                await apply_loss(interaction, bet)
-                chips = await get_chips(interaction.guild_id, interaction.user.id)
-                embed = lose_embed("🃏 War — Dealer Wins",
-                    f"{interaction.user.mention}\n\n**Your Card:** {pc}  vs  **Dealer:** {dc}\n\n"
-                    f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips")
-            try:
-                await message.edit(embed=embed)
-            except Exception: pass
-        else:
-            try:
-                await message.edit(embed=neutral_embed("🃏 War — It's a Tie! ⚔️",
-                    f"{interaction.user.mention}\n\nBoth drew **{pc}**! You may go to **War** (double or bust) or **Surrender**."),
-                    view=WarView(bet, settings, pc, dc))
-            except Exception: pass
-
-    elif game == "crash":
-        crash_point = generate_crash_point()
-        if crash_point <= 1.0:
-            await apply_loss(interaction, bet)
-            chips = await get_chips(interaction.guild_id, interaction.user.id)
-            embed = lose_embed("💥 Crash — Instant Bust!",
-                f"{interaction.user.mention} — The market crashed immediately!\n\n"
-                f"**Crash Point:** {crash_point:.2f}x\n**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips")
-            await interaction.response.send_message(embed=embed)
-            return
-        countdown_embed = neutral_embed("💥 Crash — Launching...",
-            f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n🚀  **3...**\n\nCash out before the crash!")
-        await interaction.response.send_message(embed=countdown_embed)
-        message = await interaction.original_response()
-        for count, lbl in [("2...", "🚀"), ("1...", "🔥"), ("🚀 LAUNCH!", "💥")]:
-            await asyncio.sleep(0.6)
-            try:
-                await message.edit(embed=neutral_embed("💥 Crash — Launching...",
-                    f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n{lbl}  **{count}**\n\nCash out before the crash!"))
-            except Exception: break
-        await asyncio.sleep(0.4)
-        view = CrashView(bet, settings, crash_point, current=1.0)
-        try:
-            await message.edit(embed=neutral_embed("💥 Crash — In Progress",
-                f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n**Multiplier:** 1.00x ⬆️\n\nCash out before the crash!"),
-                view=view)
-        except Exception: pass
-        current = 1.0
-        while current < crash_point and not view.cashed_out:
-            await asyncio.sleep(1.5)
-            current = round(current * random.uniform(1.05, 1.20), 2)
-            current = min(current, crash_point)
-            view.current = current
-            if view.cashed_out: break
-            try:
-                await message.edit(embed=neutral_embed("💥 Crash — In Progress",
-                    f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n**Multiplier:** {current:.2f}x ⬆️\n\nCash out before the crash!"),
-                    view=view)
-            except Exception: break
-        if not view.cashed_out:
-            view.crashed = True
-            for item in view.children: item.disabled = True
-            await apply_loss(interaction, bet)
-            chips = await get_chips(interaction.guild_id, interaction.user.id)
-            try:
-                await message.edit(embed=lose_embed(f"💥 Crash — CRASHED at {crash_point:.2f}x!",
-                    f"{interaction.user.mention} didn't cash out in time!\n\n"
-                    f"**Crash Point:** {crash_point:.2f}x\n**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips"),
-                    view=view)
-            except Exception: pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SETUP
-# ══════════════════════════════════════════════════════════════════════════════
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Casino(bot))
