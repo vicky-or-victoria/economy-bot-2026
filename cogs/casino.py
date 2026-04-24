@@ -246,44 +246,90 @@ class ChipExchangeView(discord.ui.View):
 #  GAME: COINFLIP
 # ══════════════════════════════════════════════════════════════════════════════
 
+COIN_FLIP_FRAMES = ["🌀", "🪙", "🌀", "🪙", "🌀"]
+COIN_HEADS_ART  = "⬆️ **HEADS** ⬆️"
+COIN_TAILS_ART  = "⬇️ **TAILS** ⬇️"
+
 class CoinflipView(discord.ui.View):
     def __init__(self, bet: float, settings: dict):
         super().__init__(timeout=60)
         self.bet      = bet
         self.settings = settings
+        self.resolved = False
 
     async def on_timeout(self):
+        if not self.resolved:
+            for item in self.children:
+                item.disabled = True
+
+    async def resolve(self, interaction: discord.Interaction, chosen: str):
+        if self.resolved:
+            await interaction.response.defer()
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
 
-    async def resolve(self, interaction: discord.Interaction, chosen: str):
-        for item in self.children:
-            item.disabled = True
+        # Acknowledge immediately so we can edit
+        spinning_embed = neutral_embed(
+            "🪙 Coinflip — Flipping...",
+            f"You chose **{chosen}**\n\n"
+            f"🌀  *The coin spins through the air...*  🌀\n\n"
+            f"Bet: **{self.bet:,.2f}** chips"
+        )
+        await interaction.response.edit_message(embed=spinning_embed, view=self)
+        message = await interaction.original_response()
+
+        # Animate the flip
+        flip_states = [
+            ("🪙 Coinflip — Flipping...", "🌀  *tumbling...*  🌀"),
+            ("🪙 Coinflip — Flipping...", "🟡  *it's in the air...*  🟡"),
+            ("🪙 Coinflip — Flipping...", "🌀  *almost there...*  🌀"),
+            ("🪙 Coinflip — Flipping...", "🟡  *landing...*  🟡"),
+        ]
+        for title, state in flip_states:
+            await asyncio.sleep(0.7)
+            e = neutral_embed(title, f"You chose **{chosen}**\n\n{state}\n\nBet: **{self.bet:,.2f}** chips")
+            try:
+                await message.edit(embed=e, view=self)
+            except Exception:
+                break
+
+        await asyncio.sleep(0.8)
         result = random.choice(["Heads", "Tails"])
         won    = chosen == result
-        sym    = self.settings.get("currency_symbol", "C")
+        side_art = COIN_HEADS_ART if result == "Heads" else COIN_TAILS_ART
+        emoji    = "🟡" if result == "Heads" else "⚪"
+
         if won:
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, self.bet * 2)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                "Coinflip — You Win!",
+                "🪙 Coinflip — You Win!",
+                f"```\n  ╔══════════════╗\n  ║  {emoji}  {result.upper():<6}  {emoji}  ║\n  ╚══════════════╝\n```\n"
                 f"The coin landed on **{result}**! 🎉\n\n"
+                f"**Your Pick:** {chosen}  ✅\n"
                 f"**Bet:** {self.bet:,.2f} chips\n"
                 f"**Gross Win:** {self.bet * 2:,.2f} chips\n"
                 f"**Tax (G.R.E.T.A. {self.settings.get('casino_tax_rate', 25)}%):** {tax:,.2f} chips\n"
-                f"**Net Win:** {net:,.2f} chips\n"
-                f"**New Balance:** {chips:,.2f} chips"
+                f"**Net Win:** +{net:,.2f} chips\n"
+                f"**Balance:** {chips:,.2f} chips"
             )
         else:
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                "Coinflip — Bad Luck",
+                "🪙 Coinflip — Bad Luck",
+                f"```\n  ╔══════════════╗\n  ║  {emoji}  {result.upper():<6}  {emoji}  ║\n  ╚══════════════╝\n```\n"
                 f"The coin landed on **{result}**.\n\n"
+                f"**Your Pick:** {chosen}  ❌\n"
                 f"**Lost:** {self.bet:,.2f} chips\n"
-                f"**New Balance:** {chips:,.2f} chips"
+                f"**Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            await message.edit(embed=embed, view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -541,11 +587,23 @@ WHEEL_SEGMENTS = [
     ("5x ⭐",     5.0,   5),
 ]
 
+WHEEL_DISPLAY_ORDER = ["💀 BUST", "0.5x", "1.5x", "2x", "3x", "5x ⭐"]
+
 def spin_wheel():
     segments, weights = zip(*[(s, w) for s, _, w in WHEEL_SEGMENTS])
     chosen = random.choices(segments, weights=weights, k=1)[0]
     mult   = next(m for s, m, _ in WHEEL_SEGMENTS if s == chosen)
     return chosen, mult
+
+def wheel_art(pointer_index: int, highlight: str | None = None) -> str:
+    lines = []
+    for i, seg in enumerate(WHEEL_DISPLAY_ORDER):
+        is_ptr = (i == pointer_index)
+        is_win = (highlight is not None and seg == highlight)
+        arrow  = "▶ " if is_ptr else "  "
+        marker = " ◀◀" if is_win else ""
+        lines.append(f"{arrow}{seg}{marker}")
+    return "```\n" + "\n".join(lines) + "\n```"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -921,11 +979,35 @@ HORSES = [
     ("🏇 Providence",       8.0,  7),
 ]
 
+TRACK_LENGTH = 20  # characters wide
+
+def build_race_track(positions: dict[str, int], horse_names: list[str], chosen: str, winner: str | None = None) -> str:
+    """Build an ASCII race track. positions maps name→progress (0-TRACK_LENGTH)."""
+    lines = ["```"]
+    lines.append("🏁 FINISH" + " " * (TRACK_LENGTH - 3) + "🚩 START")
+    lines.append("─" * (TRACK_LENGTH + 12))
+    for name in horse_names:
+        pos   = positions.get(name, 0)
+        label = name.split(" ", 1)[1] if " " in name else name  # strip emoji
+        emoji = name.split(" ")[0]
+        # left = finish side, right = start side; horse moves left
+        track = "." * (TRACK_LENGTH - pos) + emoji + "." * pos
+        flag  = ""
+        if winner and name == winner:
+            flag = " 🏆"
+        elif winner and name == chosen and name != winner:
+            flag = " ✗"
+        lines.append(f"|{track}| {label[:14]:<14}{flag}")
+    lines.append("─" * (TRACK_LENGTH + 12))
+    lines.append("```")
+    return "\n".join(lines)
+
 class HorseRacingView(discord.ui.View):
     def __init__(self, bet: float, settings: dict):
-        super().__init__(timeout=60)
+        super().__init__(timeout=90)
         self.bet      = bet
         self.settings = settings
+        self.racing   = False
         for name, odds, _ in HORSES:
             btn = discord.ui.Button(
                 label=f"{name} ({odds}x)",
@@ -935,43 +1017,113 @@ class HorseRacingView(discord.ui.View):
             self.add_item(btn)
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
+        if not self.racing:
+            for item in self.children:
+                item.disabled = True
 
     def _make_callback(self, horse_name: str, odds: float):
         async def callback(interaction: discord.Interaction):
+            if self.racing:
+                await interaction.response.defer()
+                return
+            self.racing = True
             for item in self.children:
                 item.disabled = True
-            names, _, weights = zip(*HORSES)
-            winner = random.choices(names, weights=list(weights), k=1)[0]
-            won    = horse_name == winner
 
-            # Animated race result embed
-            race_str = "\n".join(
-                f"{'🏆' if n == winner else '  '} {n}" for n in names
+            names_list = [n for n, _, _ in HORSES]
+            _, _, weights_list = zip(*HORSES)
+            winner = random.choices(names_list, weights=list(weights_list), k=1)[0]
+
+            # Initial response — gates open
+            positions = {n: 0 for n in names_list}
+            track_str = build_race_track(positions, names_list, horse_name)
+            start_embed = neutral_embed(
+                "🏇 Horse Racing — They're Off!",
+                f"**Your pick:** {horse_name}\n\n{track_str}\n*🎺 The gates fly open!*"
             )
+            await interaction.response.edit_message(embed=start_embed, view=self)
+            message = await interaction.original_response()
+
+            # Simulate the race — winner guaranteed to finish first
+            # Each horse has a "speed" jitter; winner gets a slight edge
+            speeds = {}
+            for n in names_list:
+                base = random.uniform(0.8, 1.4)
+                if n == winner:
+                    base = random.uniform(1.2, 1.6)  # winner runs hotter
+                speeds[n] = base
+
+            # Run frames until winner crosses finish
+            frame_count = 0
+            commentary = [
+                "🎺 *They burst from the gates!*",
+                "💨 *The field spreads out!*",
+                "📢 *Thundering hooves fill the air!*",
+                "🎙️ *A horse is making a move!*",
+                "📣 *The crowd roars!*",
+                "🏁 *The finish line is in sight!*",
+            ]
+            while True:
+                await asyncio.sleep(1.0)
+                # Advance all horses
+                for n in names_list:
+                    step = random.uniform(0.5, speeds[n] * 2)
+                    positions[n] = min(TRACK_LENGTH, positions[n] + step)
+                # Check if winner has crossed
+                if positions[winner] >= TRACK_LENGTH:
+                    # Snap winner to finish, ensure others haven't crossed
+                    positions[winner] = TRACK_LENGTH
+                    for n in names_list:
+                        if n != winner and positions[n] >= TRACK_LENGTH:
+                            positions[n] = TRACK_LENGTH - 1
+                    break
+
+                comment = commentary[min(frame_count, len(commentary) - 1)]
+                frame_count += 1
+                track_str = build_race_track(positions, names_list, horse_name)
+                live_embed = neutral_embed(
+                    "🏇 Horse Racing — In Progress!",
+                    f"**Your pick:** {horse_name}\n\n{track_str}\n{comment}"
+                )
+                try:
+                    await message.edit(embed=live_embed, view=self)
+                except Exception:
+                    break
+
+            # Final frame — show winner
+            await asyncio.sleep(0.6)
+            won = (horse_name == winner)
+            track_final = build_race_track(positions, names_list, horse_name, winner=winner)
+
             if won:
                 gross    = self.bet * odds
                 net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, gross)
                 chips    = await get_chips(interaction.guild_id, interaction.user.id)
-                embed = win_embed(
-                    "🐎 Horse Racing — Your Horse Won!",
-                    f"**Race Results:**\n{race_str}\n\n"
-                    f"**Your Pick:** {horse_name} ({odds}x)\n"
+                result_embed = win_embed(
+                    "🏆 Horse Racing — Your Horse Won!",
+                    f"{track_final}\n"
+                    f"**Winner:** {winner}\n"
+                    f"**Your Pick:** {horse_name} ✅  ({odds}x)\n\n"
                     f"**Gross Win:** {gross:,.2f} chips\n"
                     f"**Tax:** {tax:,.2f} chips\n"
-                    f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
+                    f"**Net Win:** +{net:,.2f} chips\n"
+                    f"**Balance:** {chips:,.2f} chips"
                 )
             else:
                 await apply_loss(interaction, self.bet)
                 chips = await get_chips(interaction.guild_id, interaction.user.id)
-                embed = lose_embed(
+                result_embed = lose_embed(
                     "🐎 Horse Racing — Better Luck Next Time",
-                    f"**Race Results:**\n{race_str}\n\n"
-                    f"**Your Pick:** {horse_name} ({odds}x)\n"
-                    f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
+                    f"{track_final}\n"
+                    f"**Winner:** {winner}\n"
+                    f"**Your Pick:** {horse_name} ❌\n\n"
+                    f"**Lost:** {self.bet:,.2f} chips\n"
+                    f"**Balance:** {chips:,.2f} chips"
                 )
-            await interaction.response.edit_message(embed=embed, view=self)
+            try:
+                await message.edit(embed=result_embed, view=self)
+            except Exception:
+                pass
         return callback
 
 
@@ -993,6 +1145,22 @@ def spin_slots():
     elif reels[0] == reels[1] or reels[1] == reels[2]:
         return reels, 1.5
     return reels, 0.0
+
+def slot_display(r1: str, r2: str, r3: str, spinning: list[bool] | None = None) -> str:
+    """Render a slot machine display. spinning[i] = True shows a random symbol."""
+    if spinning is None:
+        spinning = [False, False, False]
+    symbols = [SLOT_SYMBOLS[random.randint(0, len(SLOT_SYMBOLS)-1)] for _ in range(3)]
+    d1 = symbols[0] if spinning[0] else r1
+    d2 = symbols[1] if spinning[1] else r2
+    d3 = symbols[2] if spinning[2] else r3
+    return (
+        "```\n"
+        "╔═══╦═══╦═══╗\n"
+        f"║ {d1} ║ {d2} ║ {d3} ║\n"
+        "╚═══╩═══╩═══╝\n"
+        "```"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1388,27 +1556,72 @@ class Casino(commands.Cog):
         if not settings:
             return
         segment, mult = spin_wheel()
+        final_idx = WHEEL_DISPLAY_ORDER.index(segment)
+
+        # Show spinning animation
+        spin_embed = neutral_embed(
+            "🌀 Wheel of Fortune — Spinning...",
+            f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+            f"{wheel_art(0)}\n*🌀 The wheel is spinning...*"
+        )
+        await interaction.response.send_message(embed=spin_embed)
+        message = await interaction.original_response()
+
+        # Animate the pointer sweeping around, slowing down near the result
+        n = len(WHEEL_DISPLAY_ORDER)
+        # Do 2 full rotations then land on final_idx
+        spin_sequence = list(range(n)) * 2 + list(range(final_idx + 1))
+        delays = [0.15] * (len(spin_sequence) - 6) + [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
+        delays = delays[-len(spin_sequence):]  # align
+        # pad if needed
+        while len(delays) < len(spin_sequence):
+            delays.insert(0, 0.15)
+
+        for i, (ptr, delay) in enumerate(zip(spin_sequence, delays)):
+            await asyncio.sleep(delay)
+            label = "🌀 Slowing down..." if i > len(spin_sequence) - 5 else "🌀 Spinning..."
+            e = neutral_embed(
+                "🌀 Wheel of Fortune — Spinning...",
+                f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+                f"{wheel_art(ptr)}\n*{label}*"
+            )
+            try:
+                await message.edit(embed=e)
+            except Exception:
+                break
+
+        await asyncio.sleep(0.5)
+
         if mult == 0.0:
             await apply_loss(interaction, bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                "🌀 Wheel of Fortune — BUST",
-                f"{interaction.user.mention} spun the wheel and landed on **{segment}**!\n\n"
-                f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
+                "🌀 Wheel of Fortune — BUST! 💀",
+                f"{interaction.user.mention}\n\n"
+                f"{wheel_art(final_idx, highlight=segment)}\n"
+                f"The wheel landed on **{segment}**!\n\n"
+                f"**Lost:** {bet:,.2f} chips\n"
+                f"**Balance:** {chips:,.2f} chips"
             )
         else:
             gross    = bet * mult
             net, tax = await apply_tax_and_pay(interaction, settings, bet, gross)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                f"🌀 Wheel of Fortune — {segment}!",
-                f"{interaction.user.mention} spun the wheel and landed on **{segment}**!\n\n"
+                f"🌀 Wheel of Fortune — {segment}! 🎉",
+                f"{interaction.user.mention}\n\n"
+                f"{wheel_art(final_idx, highlight=segment)}\n"
+                f"The wheel landed on **{segment}**!\n\n"
                 f"**Multiplier:** {mult}x\n"
                 f"**Gross Win:** {gross:,.2f} chips\n"
                 f"**Tax:** {tax:,.2f} chips\n"
-                f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
+                f"**Net Win:** +{net:,.2f} chips\n"
+                f"**Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.send_message(embed=embed)
+        try:
+            await message.edit(embed=embed)
+        except Exception:
+            pass
 
     @app_commands.command(name="blackjack", description="Classic Blackjack — beat the dealer.")
     async def blackjack(self, interaction: discord.Interaction, bet: float):
