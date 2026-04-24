@@ -2159,12 +2159,30 @@ class Casino(commands.Cog):
         await set_casino_field(interaction.guild_id, "chip_exchange_channel_id", channel.id)
         # Post the persistent exchange menu
         embed = styled_embed(
-            "🪙 G.R.E.T.A. Chip Exchange",
-            "Welcome to the G.R.E.T.A. Chip Exchange.\n\n"
-            "Purchase chips to play on the Casino Floor, or cash out your winnings back to your wallet.\n\n"
-            "**Buy Rate:** 1:1 (wallet → chips)\n"
-            "**Cash-Out Fee:** G.R.E.T.A. retains 5% of all chip redemptions\n\n"
-            "*God. Reliant. Ethical. Trust. & Assurance.*",
+            "🏦  G.R.E.T.A. CHIP EXCHANGE  🏦",
+            "```\n"
+            "  ╔══════════════════════════════════════╗\n"
+            "  ║   UNIVERSALIS BANKING AUTHORITY      ║\n"
+            "  ║   Licensed Exchange Terminal  №001   ║\n"
+            "  ╚══════════════════════════════════════╝\n"
+            "```\n"
+            "*Greetings, citizen. You have reached the official G.R.E.T.A. Chip Exchange — "
+            "the only sanctioned gateway between your personal holdings and the Casino Floor.*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🪙 **BUY CHIPS**\n"
+            "Convert your wallet balance into casino chips at a **1:1** rate. "
+            "Chips are non-transferable and valid on the Casino Floor only.\n\n"
+            "💵 **CASH OUT**\n"
+            "Redeem chips back to your wallet. A **5% tithe** is remitted to the "
+            "G.R.E.T.A. Treasury upon each redemption, in accordance with the "
+            "Universalis Taxation & Commerce Act.\n\n"
+            "📊 **MY BALANCE**\n"
+            "View your current chip and wallet balances at a glance.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*G.R.E.T.A. assumes no liability for losses incurred on the Casino Floor. "
+            "All transactions are final. By exchanging currency you acknowledge the terms "
+            "set forth by the Universalis Banking Authority.*\n\n"
+            "**G.R.E.T.A.** — *God. Reliant. Ethical. Trust. & Assurance.*",
             color=ACCENT
         )
         await channel.send(embed=embed, view=ChipExchangeView())
@@ -2181,29 +2199,43 @@ class Casino(commands.Cog):
         await set_casino_field(interaction.guild_id, "casino_floor_channel_id", channel.id)
 
         games_embed = styled_embed(
-            "🎰 G.R.E.T.A. Casino Floor — Game Guide",
-            "Welcome to the G.R.E.T.A. Casino Floor. All games are played by simply **typing in this channel**.\n\n"
-            "**How to play:** Type the game name, optionally followed by your bet.\n"
-            "Examples: `coinflip`, `slots 500`, `i want to play blackjack`, `horserace 1000`\n"
-            "If you don't include a bet, G.R.E.T.A. will ask you.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🪙 **Coinflip** — Heads or Tails. Win **2x**.\n"
-            "🎲 **Dice** — Over 3 or Under 4. Win **1.8x**.\n"
-            "🃏 **HiLo** — Guess higher or lower. Chain up to 5x for **1.9x** each step.\n"
-            "🎱 **Keno** — Pick 1–10 numbers from 1–40. Up to **500x** payout.\n"
-            "🌀 **Wheel** — Spin the Wheel of Fortune. Win up to **5x**.\n"
-            "🃏 **Blackjack** — Beat the dealer. Natural 21 pays **2.5x**.\n"
-            "🎴 **Baccarat** — Player, Banker, or Tie. Tie pays **8x**.\n"
-            "🃏 **ThreeCardPoker** — Beat the dealer's hand. Three-of-a-kind pays **5x**.\n"
-            "🎯 **PickANumber** — Pick 1–10. Exact match pays **8x**.\n"
-            "🐎 **HorseRace** — Back a horse. Up to **8x** odds.\n"
-            "🎰 **Slots** — Match symbols. Jackpot pays **50x**.\n"
-            "💣 **Minesweeper** — Reveal safe tiles. **1.25x** per tile, cash out anytime.\n"
-            "⚔️ **War** — Highest card wins. Tie? Go to War for **4x**.\n"
-            "💥 **Crash** — Ride the multiplier and cash out before it crashes.\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "*All winnings subject to G.R.E.T.A. taxation. Chips required to play — visit the Chip Exchange to top up.*\n"
-            "*G.R.E.T.A. — Universalis Banking System*",
+            "🎰  THE G.R.E.T.A. CASINO FLOOR  🎰",
+            "```\n"
+            "  ╔══════════════════════════════════════╗\n"
+            "  ║    UNIVERSALIS ENTERTAINMENT ZONE    ║\n"
+            "  ║    Operated under G.R.E.T.A. Lic.   ║\n"
+            "  ╚══════════════════════════════════════╝\n"
+            "```\n"
+            "*Welcome, citizen, to the only legally sanctioned house of chance in all of Universalis. "
+            "G.R.E.T.A. reminds you that fortune favours the faithful — and the taxed.*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "**📋 HOW TO PLAY**\n"
+            "Simply **type the name of a game** in this channel — with or without a bet amount. "
+            "G.R.E.T.A. will handle the rest.\n"
+            "> `coinflip` → prompted for a bet\n"
+            "> `slots 500` → straight to the reels\n"
+            "> `i want to play blackjack 1000` → also works\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "**🎲 AVAILABLE GAMES**\n\n"
+            "🪙 **Coinflip** — Heads or Tails. *Pays 2x.*\n"
+            "🎲 **Dice** — Over 3 or Under 4. *Pays 1.8x.*\n"
+            "🃏 **HiLo** — Higher or lower? Chain up to 5 correct calls. *1.9x per step.*\n"
+            "🎱 **Keno** — Pick 1–10 numbers from 1–40. *Up to 500x.*\n"
+            "🌀 **Wheel** — Spin the Wheel of Fortune. *Up to 5x.*\n"
+            "🃏 **Blackjack** — Beat the dealer. Natural 21 pays *2.5x.*\n"
+            "🎴 **Baccarat** — Player, Banker, or Tie. Tie pays *8x.*\n"
+            "🃏 **ThreeCardPoker** — Beat the dealer's hand. Three-of-a-kind pays *5x.*\n"
+            "🎯 **PickANumber** — Pick 1–10. Exact match pays *8x.*\n"
+            "🐎 **HorseRace** — Back a horse. *Up to 8x odds.*\n"
+            "🎰 **Slots** — Match the symbols. Jackpot pays *50x.*\n"
+            "💣 **Minesweeper** — Reveal safe tiles and walk away. *1.25x per tile.*\n"
+            "⚔️ **War** — Highest card wins. Tie? Declare War for *4x.*\n"
+            "💥 **Crash** — Ride the multiplier. Cash out before it all burns.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*All winnings are subject to G.R.E.T.A. taxation. Chips are required to play — "
+            "visit the Chip Exchange to fund your account. The house wishes you luck. "
+            "The house also keeps records.*\n\n"
+            "**G.R.E.T.A.** — *God. Reliant. Ethical. Trust. & Assurance.*",
             color=ACCENT
         )
         await channel.send(embed=games_embed)
