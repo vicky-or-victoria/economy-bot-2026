@@ -563,6 +563,10 @@ class HiLoView(discord.ui.View):
             "You haven't made a guess yet — make your first call to start the chain!",
             ephemeral=True
         )
+
+
+class HiLoActiveView(discord.ui.View):
+    """Shown after the first correct guess — adds a real Cash Out button."""
     def __init__(self, bet, settings, current_card, chain, multiplier):
         super().__init__(timeout=60)
         self.bet          = bet
@@ -1671,67 +1675,6 @@ class CrashView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CASINO COG
-# ══════════════════════════════════════════════════════════════════════════════
-
-class Casino(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-
-    # ── Message-based game triggers ───────────────────────────────────────────
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
-            return
-
-        settings = await get_casino_settings(message.guild.id)
-        floor_id = settings.get("casino_floor_channel_id")
-        if not floor_id or message.channel.id != floor_id:
-            return
-        if not settings.get("casino_enabled", True):
-            return
-
-        game, bet = _parse_game_and_bet(message.content)
-        if game is None:
-            return  # not a game command, ignore
-
-        # Delete the trigger message to keep the channel clean
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
-        # If no bet supplied, show a modal to ask for one
-        # We can't send a modal from on_message, so send an ephemeral prompt with a button
-        if bet is None:
-            view = _BetPromptView(game)
-            prompt = await message.channel.send(
-                content=message.author.mention,
-                embed=neutral_embed(
-                    f"🎰 {game.title()} — Place Your Bet",
-                    f"How much would you like to wager?\nClick the button below to enter your bet."
-                ),
-                view=view
-            )
-            view._prompt_message = prompt
-        else:
-            # We have a bet — but on_message can't use interaction, so send a prompt button
-            # that auto-submits with the parsed bet
-            view = _BetConfirmView(game, bet)
-            prompt = await message.channel.send(
-                content=message.author.mention,
-                embed=neutral_embed(
-                    f"🎰 {game.title()} — Confirm Bet",
-                    f"**Bet:** {bet:,.2f} chips\nClick to confirm and start the game."
-                ),
-                view=view
-            )
-            view._prompt_message = prompt
-            view._author_id = message.author.id
-
-
 class _BetPromptView(discord.ui.View):
     """Shown when user typed a game name with no bet — prompts them to enter one."""
     def __init__(self, game: str):
@@ -1792,6 +1735,60 @@ class _BetConfirmView(discord.ui.View):
             except Exception:
                 pass
         await interaction.response.defer()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CASINO COG
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Casino(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+
+        settings = await get_casino_settings(message.guild.id)
+        floor_id = settings.get("casino_floor_channel_id")
+        if not floor_id or message.channel.id != floor_id:
+            return
+        if not settings.get("casino_enabled", True):
+            return
+
+        game, bet = _parse_game_and_bet(message.content)
+        if game is None:
+            return
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        if bet is None:
+            view = _BetPromptView(game)
+            prompt = await message.channel.send(
+                content=message.author.mention,
+                embed=neutral_embed(
+                    f"🎰 {game.title()} — Place Your Bet",
+                    f"How much would you like to wager?\nClick the button below to enter your bet."
+                ),
+                view=view
+            )
+            view._prompt_message = prompt
+        else:
+            view = _BetConfirmView(game, bet)
+            prompt = await message.channel.send(
+                content=message.author.mention,
+                embed=neutral_embed(
+                    f"🎰 {game.title()} — Confirm Bet",
+                    f"**Bet:** {bet:,.2f} chips\nClick to confirm and start the game."
+                ),
+                view=view
+            )
+            view._prompt_message = prompt
+            view._author_id = message.author.id
 
     # ── Admin setup commands ──────────────────────────────────────────────────
 
