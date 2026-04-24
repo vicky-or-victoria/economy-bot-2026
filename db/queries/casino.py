@@ -123,15 +123,16 @@ async def get_house_pot(guild_id: int) -> float:
 async def drain_house_pot(guild_id: int) -> float:
     """Zero out the house pot. Returns the amount drained."""
     pool = get_pool()
+    # Use a CTE to capture the old value before zeroing it
     row = await pool.fetchrow(
-        """UPDATE guilds SET casino_house_pot = 0
-           WHERE guild_id = $1
-           RETURNING casino_house_pot""",
+        """WITH old_val AS (
+               SELECT casino_house_pot FROM guilds WHERE guild_id = $1
+           )
+           UPDATE guilds SET casino_house_pot = 0 WHERE guild_id = $1
+           RETURNING (SELECT casino_house_pot FROM old_val)""",
         guild_id
     )
-    # casino_house_pot is now 0; return what it was
-    pot = await pool.fetchval("SELECT casino_house_pot FROM guilds WHERE guild_id = $1", guild_id)
-    return float(row["casino_house_pot"]) if row else 0.0
+    return float(row[0]) if row else 0.0
 
 
 # ── Cooldown ──────────────────────────────────────────────────────────────────
