@@ -1261,14 +1261,13 @@ async def _resolve_expansion_and_notify(
     final_status: str,
     approved_rev: float | None,
     reason: str,
+    was_modified: bool = False,
+    original_rev: float | None = None,
 ):
     """
     Shared resolution logic for all three expansion review paths.
-    - Resolves the DB record.
-    - DMs the owner.
-    - Posts the expansion roleplay to the business forum thread.
-    - Refreshes the business post embed if approved.
-    - Edits the original review message in-place (removes buttons, shows result).
+    - was_modified: True only when admin changed the revenue via Modify & Approve.
+    - original_rev: the submitted estimate, only meaningful when was_modified=True.
     """
     import traceback as _tb
 
@@ -1291,9 +1290,16 @@ async def _resolve_expansion_and_notify(
         member = interaction.guild.get_member(owner_id) if owner_id else None
         if member:
             if final_status == "approved":
+                if was_modified:
+                    rev_line = (
+                        f"**Submitted Revenue:** {sym}{original_rev:,.2f}/day\n"
+                        f"**Approved Revenue:** {sym}{approved_rev:,.2f}/day"
+                    )
+                else:
+                    rev_line = f"**Revenue Added:** {sym}{approved_rev:,.2f}/day"
                 msg_body = (
                     f"G.R.E.T.A. has approved your expansion proposal **{proposal_title}**.\n\n"
-                    f"**Revenue Added:** {sym}{approved_rev:,.2f}/day\n\n"
+                    f"{rev_line}\n\n"
                     f"**G.R.E.T.A. Note:** _{reason}_"
                 )
                 dm_color = SUCCESS
@@ -1311,16 +1317,24 @@ async def _resolve_expansion_and_notify(
     if business_id:
         try:
             biz = await get_business(business_id)
-            thread_id  = biz.get("post_thread_id")  if biz else None
+            thread_id = biz.get("post_thread_id") if biz else None
             if thread_id:
                 thread = interaction.guild.get_channel(thread_id) or await interaction.guild.fetch_channel(thread_id)
                 if thread:
                     if final_status == "approved":
-                        rp_color  = SUCCESS
-                        rp_header = f"✅ Expansion Approved — {proposal_title}"
-                        rp_body   = (
+                        rp_color = SUCCESS
+                        if was_modified:
+                            rp_header = f"✅ Expansion Approved & Modified — {proposal_title}"
+                            rp_rev_line = (
+                                f"**Submitted Revenue:** {sym}{original_rev:,.2f}/day\n"
+                                f"**Approved Revenue:** {sym}{approved_rev:,.2f}/day"
+                            )
+                        else:
+                            rp_header = f"✅ Expansion Approved — {proposal_title}"
+                            rp_rev_line = f"**Revenue Increase:** +{sym}{approved_rev:,.2f}/day"
+                        rp_body = (
                             f"{description}\n\n"
-                            f"**Revenue Increase:** +{sym}{approved_rev:,.2f}/day\n"
+                            f"{rp_rev_line}\n"
                             f"**G.R.E.T.A. Note:** _{reason}_"
                         )
                     else:
@@ -1336,7 +1350,10 @@ async def _resolve_expansion_and_notify(
 
     # ── Edit the original review message in-place (removes buttons) ───────────
     if final_status == "approved":
-        result_label = f"Approved — +{sym}{approved_rev:,.2f}/day"
+        if was_modified:
+            result_label = f"Approved & Modified — {sym}{original_rev:,.2f} → {sym}{approved_rev:,.2f}/day"
+        else:
+            result_label = f"Approved — +{sym}{approved_rev:,.2f}/day"
         result_color = SUCCESS
     else:
         result_label = "Denied"
@@ -1391,7 +1408,8 @@ class ExpansionReviewView(discord.ui.View):
             interaction, proposal_id,
             final_status="approved",
             approved_rev=float(proposal["estimated_revenue"]),
-            reason="",
+            reason="G.R.E.T.A. has reviewed and sanctioned this proposal.",
+            was_modified=False,
         )
 
     @discord.ui.button(label="✏️ Modify & Approve", style=discord.ButtonStyle.primary, custom_id="exprev:modify:0")
@@ -1466,11 +1484,16 @@ class ExpansionModifyModal(discord.ui.Modal, title="Modify & Approve Expansion")
         else:
             approved_rev = self.estimated_revenue
 
+        # Only flag as modified if the admin actually changed the number
+        was_modified = abs(approved_rev - self.estimated_revenue) > 0.001
+
         await _resolve_expansion_and_notify(
             interaction, self.proposal_id,
             final_status="approved",
             approved_rev=approved_rev,
             reason=self.reason.value,
+            was_modified=was_modified,
+            original_rev=self.estimated_revenue if was_modified else None,
         )
 
 
