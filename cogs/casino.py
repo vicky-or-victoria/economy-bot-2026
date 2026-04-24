@@ -349,12 +349,17 @@ class DiceView(discord.ui.View):
         super().__init__(timeout=60)
         self.bet      = bet
         self.settings = settings
+        self.resolved = False
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
 
     async def resolve(self, interaction: discord.Interaction, choice: str):
+        if self.resolved:
+            await interaction.response.defer()
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
         roll   = random.randint(1, 6)
@@ -756,12 +761,17 @@ class BaccaratView(discord.ui.View):
         super().__init__(timeout=60)
         self.bet      = bet
         self.settings = settings
+        self.resolved = False
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
 
     async def resolve(self, interaction: discord.Interaction, choice: str):
+        if self.resolved:
+            await interaction.response.defer()
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
         deck   = DECK.copy()
@@ -981,13 +991,13 @@ HORSES = [
 
 TRACK_LENGTH = 20  # characters wide
 
-def build_race_track(positions: dict[str, int], horse_names: list[str], chosen: str, winner: str | None = None) -> str:
+def build_race_track(positions: dict[str, float], horse_names: list[str], chosen: str, winner: str | None = None) -> str:
     """Build an ASCII race track. positions maps name→progress (0-TRACK_LENGTH)."""
     lines = ["```"]
     lines.append("🏁 FINISH" + " " * (TRACK_LENGTH - 3) + "🚩 START")
     lines.append("─" * (TRACK_LENGTH + 12))
     for name in horse_names:
-        pos   = positions.get(name, 0)
+        pos   = int(positions.get(name, 0))  # cast float→int for string multiplication
         label = name.split(" ", 1)[1] if " " in name else name  # strip emoji
         emoji = name.split(" ")[0]
         # left = finish side, right = start side; horse moves left
@@ -1008,10 +1018,11 @@ class HorseRacingView(discord.ui.View):
         self.bet      = bet
         self.settings = settings
         self.racing   = False
-        for name, odds, _ in HORSES:
+        for i, (name, odds, _) in enumerate(HORSES):
             btn = discord.ui.Button(
                 label=f"{name} ({odds}x)",
-                style=discord.ButtonStyle.primary
+                style=discord.ButtonStyle.primary,
+                row=i // 3  # 3 per row → row 0 for horses 0-2, row 1 for horses 3-5
             )
             btn.callback = self._make_callback(name, odds)
             self.add_item(btn)
@@ -1699,7 +1710,39 @@ class Casino(commands.Cog):
         settings = await casino_guard(interaction, bet)
         if not settings:
             return
+
         reels, mult = spin_slots()
+
+        # ── Spin animation ────────────────────────────────────────────────────
+        spin_embed = neutral_embed(
+            "🎰 Slots — Spinning...",
+            f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+            f"{slot_display('❓', '❓', '❓', [True, True, True])}\n"
+            "*🎰 Pulling the lever...*"
+        )
+        await interaction.response.send_message(embed=spin_embed)
+        message = await interaction.original_response()
+
+        # Reel-stop animation: left reel stops first, then middle, then right
+        spin_stages = [
+            ([False, True,  True],  reels[0], "❓",      "❓",      "*⏸ First reel locked...*"),
+            ([False, False, True],  reels[0], reels[1], "❓",      "*⏸ Second reel locked...*"),
+        ]
+        for spinning_flags, r1, r2, r3, label in spin_stages:
+            await asyncio.sleep(0.8)
+            e = neutral_embed(
+                "🎰 Slots — Spinning...",
+                f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+                f"{slot_display(r1, r2, r3, spinning_flags)}\n{label}"
+            )
+            try:
+                await message.edit(embed=e)
+            except Exception:
+                break
+
+        await asyncio.sleep(0.9)
+
+        # ── Final result ──────────────────────────────────────────────────────
         reel_str = " | ".join(reels)
         if mult == 0.0:
             await apply_loss(interaction, bet)
@@ -1707,7 +1750,7 @@ class Casino(commands.Cog):
             embed = lose_embed(
                 "🎰 Slots — No Match",
                 f"{interaction.user.mention}\n\n"
-                f"[ {reel_str} ]\n\n"
+                f"{slot_display(reels[0], reels[1], reels[2])}\n\n"
                 f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
         else:
@@ -1718,13 +1761,16 @@ class Casino(commands.Cog):
             embed = win_embed(
                 label,
                 f"{interaction.user.mention}\n\n"
-                f"[ {reel_str} ]\n\n"
+                f"{slot_display(reels[0], reels[1], reels[2])}\n\n"
                 f"**Multiplier:** {mult}x\n"
                 f"**Gross Win:** {gross:,.2f} chips\n"
                 f"**Tax:** {tax:,.2f} chips\n"
                 f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.send_message(embed=embed)
+        try:
+            await message.edit(embed=embed)
+        except Exception:
+            pass
 
     @app_commands.command(name="minesweeper", description="Reveal safe tiles and cash out before hitting a mine!")
     async def minesweeper(self, interaction: discord.Interaction, bet: float):
