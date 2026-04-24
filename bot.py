@@ -10,6 +10,7 @@ COGS = [
     "cogs.menu",
     "cogs.businesses",
     "cogs.stocks",
+    "cogs.casino",
 ]
 
 class EconBot(commands.Bot):
