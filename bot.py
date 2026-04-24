@@ -17,6 +17,7 @@ class EconBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
+        intents.message_content = True  # Required to read message.content in on_message
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -24,8 +25,17 @@ class EconBot(commands.Bot):
         await migrate()
         for cog in COGS:
             await self.load_extension(cog)
-        await self.tree.sync()
-        print(f"Synced slash commands.")
+        # Sync globally (can take up to 1 hour to propagate on first run).
+        # To get commands instantly during development, set GUILD_ID in your environment.
+        guild_id = os.environ.get("GUILD_ID")
+        if guild_id:
+            guild = discord.Object(id=int(guild_id))
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            print(f"Synced slash commands to guild {guild_id} (instant).")
+        else:
+            await self.tree.sync()
+            print(f"Synced slash commands globally (may take up to 1 hour).")
 
     async def on_ready(self):
         await self.change_presence(
