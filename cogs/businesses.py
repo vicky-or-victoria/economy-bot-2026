@@ -1255,13 +1255,113 @@ class ReviewView(discord.ui.View):
         )
 
 
+async def _resolve_expansion_and_notify(
+    interaction: discord.Interaction,
+    proposal_id: int,
+    final_status: str,
+    approved_rev: float | None,
+    reason: str,
+):
+    """
+    Shared resolution logic for all three expansion review paths.
+    - Resolves the DB record.
+    - DMs the owner.
+    - Posts the expansion roleplay to the business forum thread.
+    - Refreshes the business post embed if approved.
+    - Edits the original review message in-place (removes buttons, shows result).
+    """
+    import traceback as _tb
+
+    pool = get_pool()
+
+    # Fetch full proposal BEFORE resolve so we have description + business_id
+    proposal = await get_expansion(proposal_id)
+    proposal_title = proposal["title"] if proposal else f"#{proposal_id}"
+    owner_id       = proposal["owner_id"] if proposal else None
+    business_id    = proposal["business_id"] if proposal else None
+    description    = proposal.get("description", "") if proposal else ""
+
+    await resolve_expansion(proposal_id, final_status, reason, approved_rev)
+
+    guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
+    sym = guild_row["currency_symbol"]
+
+    # ── DM the owner ──────────────────────────────────────────────────────────
+    try:
+        member = interaction.guild.get_member(owner_id) if owner_id else None
+        if member:
+            if final_status == "approved":
+                msg_body = (
+                    f"G.R.E.T.A. has approved your expansion proposal **{proposal_title}**.\n\n"
+                    f"**Revenue Added:** {sym}{approved_rev:,.2f}/day\n\n"
+                    f"**G.R.E.T.A. Note:** _{reason}_"
+                )
+                dm_color = SUCCESS
+            else:
+                msg_body = (
+                    f"After review, G.R.E.T.A. has declined your expansion proposal **{proposal_title}**.\n\n"
+                    f"**G.R.E.T.A. Note:** _{reason}_"
+                )
+                dm_color = DANGER
+            await member.send(embed=styled_embed_formal("Expansion Decision", msg_body, color=dm_color))
+    except Exception:
+        pass
+
+    # ── Post expansion roleplay to the business forum thread ──────────────────
+    if business_id:
+        try:
+            biz = await get_business(business_id)
+            thread_id  = biz.get("post_thread_id")  if biz else None
+            if thread_id:
+                thread = interaction.guild.get_channel(thread_id) or await interaction.guild.fetch_channel(thread_id)
+                if thread:
+                    if final_status == "approved":
+                        rp_color  = SUCCESS
+                        rp_header = f"✅ Expansion Approved — {proposal_title}"
+                        rp_body   = (
+                            f"{description}\n\n"
+                            f"**Revenue Increase:** +{sym}{approved_rev:,.2f}/day\n"
+                            f"**G.R.E.T.A. Note:** _{reason}_"
+                        )
+                    else:
+                        rp_color  = DANGER
+                        rp_header = f"❌ Expansion Declined — {proposal_title}"
+                        rp_body   = (
+                            f"{description}\n\n"
+                            f"**G.R.E.T.A. Note:** _{reason}_"
+                        )
+                    await thread.send(embed=styled_embed(rp_header, rp_body, color=rp_color))
+        except Exception:
+            _tb.print_exc()
+
+    # ── Edit the original review message in-place (removes buttons) ───────────
+    if final_status == "approved":
+        result_label = f"Approved — +{sym}{approved_rev:,.2f}/day"
+        result_color = SUCCESS
+    else:
+        result_label = "Denied"
+        result_color = DANGER
+
+    reason_line = f"\n**Reason:** {reason}" if reason else ""
+    result_embed = styled_embed(
+        f"Expansion #{proposal_id} — {result_label}",
+        f"**{proposal_title}**{reason_line}\n\n"
+        f"Reviewed by {interaction.user.mention}",
+        color=result_color
+    )
+    await interaction.response.edit_message(embed=result_embed, view=None)
+
+    # ── Refresh the live business post embed if approved ──────────────────────
+    if final_status == "approved" and business_id:
+        await _refresh_business_post(interaction.guild, business_id)
+
+
 class ExpansionReviewView(discord.ui.View):
     def __init__(self, proposal_id: int):
-        super().__init__(timeout=300)
-        # Encode proposal_id into each button custom_id so no state lives on the view
-        self.approve_btn.custom_id  = f"exprev:approve:{proposal_id}"
-        self.modify_btn.custom_id   = f"exprev:modify:{proposal_id}"
-        self.deny_btn.custom_id     = f"exprev:deny:{proposal_id}"
+        super().__init__(timeout=None)
+        self.approve_btn.custom_id = f"exprev:approve:{proposal_id}"
+        self.modify_btn.custom_id  = f"exprev:modify:{proposal_id}"
+        self.deny_btn.custom_id    = f"exprev:deny:{proposal_id}"
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item):
         import traceback
@@ -1281,8 +1381,17 @@ class ExpansionReviewView(discord.ui.View):
         if not proposal:
             await interaction.response.send_message("Proposal not found.", ephemeral=True)
             return
-        await interaction.response.send_modal(
-            ExpansionDecisionModal(proposal_id, "approved", float(proposal["estimated_revenue"]), proposal["owner_id"])
+        if proposal["status"] != "pending":
+            await interaction.response.send_message(
+                f"This proposal has already been **{proposal['status']}**.", ephemeral=True
+            )
+            return
+        # Instant approval — use the submitted estimated revenue, no modal
+        await _resolve_expansion_and_notify(
+            interaction, proposal_id,
+            final_status="approved",
+            approved_rev=float(proposal["estimated_revenue"]),
+            reason="",
         )
 
     @discord.ui.button(label="✏️ Modify & Approve", style=discord.ButtonStyle.primary, custom_id="exprev:modify:0")
@@ -1292,8 +1401,13 @@ class ExpansionReviewView(discord.ui.View):
         if not proposal:
             await interaction.response.send_message("Proposal not found.", ephemeral=True)
             return
+        if proposal["status"] != "pending":
+            await interaction.response.send_message(
+                f"This proposal has already been **{proposal['status']}**.", ephemeral=True
+            )
+            return
         await interaction.response.send_modal(
-            ExpansionDecisionModal(proposal_id, "modified", float(proposal["estimated_revenue"]), proposal["owner_id"])
+            ExpansionModifyModal(proposal_id, float(proposal["estimated_revenue"]))
         )
 
     @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="exprev:deny:0")
@@ -1303,107 +1417,91 @@ class ExpansionReviewView(discord.ui.View):
         if not proposal:
             await interaction.response.send_message("Proposal not found.", ephemeral=True)
             return
-        await interaction.response.send_modal(
-            ExpansionDecisionModal(proposal_id, "denied", float(proposal["estimated_revenue"]), proposal["owner_id"])
-        )
+        if proposal["status"] != "pending":
+            await interaction.response.send_message(
+                f"This proposal has already been **{proposal['status']}**.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(ExpansionDenyModal(proposal_id))
 
 
-class ExpansionDecisionModal(discord.ui.Modal):
-    reason = discord.ui.TextInput(
-        label="Roleplay Reason / Admin Note",
-        style=discord.TextStyle.paragraph,
-        placeholder="Explain your decision in roleplay terms...",
-        max_length=500
-    )
+class ExpansionModifyModal(discord.ui.Modal, title="Modify & Approve Expansion"):
+    """Opened only for Modify & Approve — lets admin adjust revenue and write a reason."""
     revenue_override = discord.ui.TextInput(
-        label="Revenue Increase (blank = estimate, 0 = deny)",
-        placeholder="e.g. 300  (only used for approve/modify)",
+        label="Approved Revenue Increase",
+        placeholder="e.g. 300  (leave blank to use submitted estimate)",
         required=False,
         max_length=16
     )
+    reason = discord.ui.TextInput(
+        label="Roleplay Reason / Admin Note",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explain the modification in roleplay terms...",
+        max_length=500
+    )
 
-    def __init__(self, proposal_id: int, decision: str, estimated_revenue: float, owner_id: int):
-        super().__init__(title="Expansion Decision")
-        self.proposal_id = proposal_id
-        self.decision = decision
+    def __init__(self, proposal_id: int, estimated_revenue: float):
+        super().__init__()
+        self.proposal_id       = proposal_id
         self.estimated_revenue = estimated_revenue
-        self.owner_id = owner_id
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         import traceback
         traceback.print_exception(type(error), error, error.__traceback__)
         try:
-            await interaction.followup.send(
-                f"An error occurred processing this decision: `{error}`", ephemeral=True
-            )
+            await interaction.followup.send(f"An error occurred: `{error}`", ephemeral=True)
         except Exception:
             pass
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        rev_str = self.revenue_override.value.strip()
+        if rev_str:
+            try:
+                approved_rev = float(rev_str.replace(",", ""))
+                if approved_rev <= 0:
+                    raise ValueError
+            except ValueError:
+                await interaction.response.send_message("Invalid revenue amount.", ephemeral=True)
+                return
+        else:
+            approved_rev = self.estimated_revenue
 
-        approved_rev = None
-        if self.decision in ("approved", "modified"):
-            rev_str = self.revenue_override.value.strip()
-            if rev_str:
-                try:
-                    approved_rev = float(rev_str.replace(",", ""))
-                except ValueError:
-                    await interaction.followup.send("Invalid revenue amount.", ephemeral=True)
-                    return
-            else:
-                approved_rev = self.estimated_revenue
+        await _resolve_expansion_and_notify(
+            interaction, self.proposal_id,
+            final_status="approved",
+            approved_rev=approved_rev,
+            reason=self.reason.value,
+        )
 
-        final_status = "approved" if self.decision != "denied" else "denied"
 
-        # Fetch proposal title BEFORE resolve (the JOIN may break after cascade deletes)
-        pool = get_pool()
-        proposal = await pool.fetchrow("SELECT title FROM expansion_proposals WHERE id = $1", self.proposal_id)
-        proposal_title = proposal["title"] if proposal else f"#{self.proposal_id}"
+class ExpansionDenyModal(discord.ui.Modal, title="Deny Expansion"):
+    """Opened only for Deny — admin writes the reason, nothing else."""
+    reason = discord.ui.TextInput(
+        label="Reason for Denial",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explain why this expansion is being denied...",
+        max_length=500
+    )
 
-        await resolve_expansion(self.proposal_id, final_status, self.reason.value, approved_rev)
+    def __init__(self, proposal_id: int):
+        super().__init__()
+        self.proposal_id = proposal_id
 
-        guild_row = await pool.fetchrow("SELECT * FROM guilds WHERE guild_id = $1", interaction.guild_id)
-        sym = guild_row["currency_symbol"]
-
-        # DM the business owner
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import traceback
+        traceback.print_exception(type(error), error, error.__traceback__)
         try:
-            member = interaction.guild.get_member(self.owner_id)
-            if member:
-                if final_status == "approved":
-                    msg_body = (
-                        f"G.R.E.T.A. has approved your expansion proposal **{proposal_title}**.\n\n"
-                        f"**Revenue Added:** {sym}{approved_rev:,.2f}/day\n\n"
-                        f"**G.R.E.T.A. Note:** _{self.reason.value}_"
-                    )
-                    color = SUCCESS
-                else:
-                    msg_body = (
-                        f"After review, G.R.E.T.A. has declined your expansion proposal **{proposal_title}**.\n\n"
-                        f"**G.R.E.T.A. Note:** _{self.reason.value}_"
-                    )
-                    color = DANGER
-                await member.send(embed=styled_embed_formal("Expansion Decision", msg_body, color=color))
+            await interaction.followup.send(f"An error occurred: `{error}`", ephemeral=True)
         except Exception:
             pass
 
-        if final_status == "approved":
-            result_text = f"approved (+{sym}{approved_rev:,.2f})"
-        else:
-            result_text = "denied"
-
-        await interaction.followup.send(
-            embed=styled_embed("Decision Recorded", f"Proposal #{self.proposal_id} {result_text}.", color=SUCCESS),
-            ephemeral=True
+    async def on_submit(self, interaction: discord.Interaction):
+        await _resolve_expansion_and_notify(
+            interaction, self.proposal_id,
+            final_status="denied",
+            approved_rev=None,
+            reason=self.reason.value,
         )
-
-        # If approved, revenue changed — refresh the business post
-        if final_status == "approved":
-            proposal_row = await pool.fetchrow(
-                "SELECT business_id FROM expansion_proposals WHERE id = $1", self.proposal_id
-            )
-            if proposal_row:
-                await _refresh_business_post(interaction.guild, proposal_row["business_id"])
 
 
 async def setup(bot: commands.Bot):
