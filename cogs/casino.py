@@ -2016,9 +2016,9 @@ class Casino(commands.Cog):
         await interaction.response.send_message(embed=spin_embed)
         message = await interaction.original_response()
 
-        # Fast spin frames — all reels blurring
-        for _ in range(3):
-            await asyncio.sleep(0.25)
+        # ── Phase 1: fast blur — all three reels spinning (8 frames @ 0.18s) ──
+        for _ in range(8):
+            await asyncio.sleep(0.18)
             e = neutral_embed(
                 "🎰 Slots — Spinning...",
                 f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
@@ -2030,13 +2030,27 @@ class Casino(commands.Cog):
             except Exception:
                 break
 
-        # Reel-stop animation: left reel stops, then middle, then right
-        spin_stages = [
-            ([False, True,  True],  reels[0], "❓",      "❓",      f"*⏸ {reels[0]} — first reel locked!*"),
-            ([False, False, True],  reels[0], reels[1], "❓",      f"*⏸ {reels[1]} — second reel locked!*"),
+        # ── Phase 2: slowdown — all still spinning, frames get longer (5 frames) ──
+        for delay in [0.22, 0.27, 0.32, 0.38, 0.44]:
+            await asyncio.sleep(delay)
+            e = neutral_embed(
+                "🎰 Slots — Spinning...",
+                f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
+                f"{slot_display('❓', '❓', '❓', [True, True, True])}\n"
+                "*🌀 Slowing down...*"
+            )
+            try:
+                await message.edit(embed=e)
+            except Exception:
+                break
+
+        # ── Phase 3: reels lock one by one ────────────────────────────────────
+        reel_stages = [
+            ([False, True,  True],  reels[0], "❓",      "❓",      f"*⏸ {reels[0]} — first reel locked!*",  0.55),
+            ([False, False, True],  reels[0], reels[1], "❓",      f"*⏸ {reels[1]} — second reel locked!*", 0.65),
         ]
-        for spinning_flags, r1, r2, r3, label in spin_stages:
-            await asyncio.sleep(0.4)
+        for spinning_flags, r1, r2, r3, label, delay in reel_stages:
+            await asyncio.sleep(delay)
             e = neutral_embed(
                 "🎰 Slots — Spinning...",
                 f"{interaction.user.mention} bet **{bet:,.2f}** chips\n\n"
@@ -2047,7 +2061,7 @@ class Casino(commands.Cog):
             except Exception:
                 break
 
-        await asyncio.sleep(0.45)
+        await asyncio.sleep(0.75)
 
         # ── Final result ──────────────────────────────────────────────────────
         reel_str = " | ".join(reels)
