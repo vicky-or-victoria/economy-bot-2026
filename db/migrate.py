@@ -20,6 +20,13 @@ CREATE TABLE IF NOT EXISTS guilds (
     tax_rate_stock_profit NUMERIC(5, 2) NOT NULL DEFAULT 20.0,
     tax_rate_dividend     NUMERIC(5, 2) NOT NULL DEFAULT 10.0,
     salary_max_pct        NUMERIC(5, 2) NOT NULL DEFAULT 50.0,
+    casino_enabled             BOOLEAN NOT NULL DEFAULT TRUE,
+    chip_exchange_channel_id   BIGINT,
+    casino_floor_channel_id    BIGINT,
+    casino_max_bet             NUMERIC(18, 2),
+    casino_tax_rate            NUMERIC(5, 2) NOT NULL DEFAULT 25.0,
+    casino_cooldown            INT NOT NULL DEFAULT 5,
+    casino_house_pot           NUMERIC(18, 2) NOT NULL DEFAULT 0,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -29,6 +36,7 @@ CREATE TABLE IF NOT EXISTS wallets (
     user_id         BIGINT NOT NULL,
     cash_balance    NUMERIC(18, 2) NOT NULL DEFAULT 0,
     digital_balance NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    chips           NUMERIC(18, 2) NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (guild_id, user_id)
 );
@@ -127,6 +135,13 @@ CREATE TABLE IF NOT EXISTS market_events (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS casino_cooldowns (
+    guild_id    BIGINT NOT NULL,
+    user_id     BIGINT NOT NULL,
+    last_played TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (guild_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_wallets_guild_user      ON wallets(guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_businesses_guild        ON businesses(guild_id);
 CREATE INDEX IF NOT EXISTS idx_stocks_guild            ON stocks(guild_id);
@@ -146,6 +161,20 @@ MIGRATIONS = [
     "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS ipo_completed BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE stock_holdings ADD COLUMN IF NOT EXISTS avg_buy_price NUMERIC(18,4) NOT NULL DEFAULT 0",
     "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS review_channel_id BIGINT",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS casino_enabled BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS chip_exchange_channel_id BIGINT",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS casino_floor_channel_id BIGINT",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS casino_max_bet NUMERIC(18,2)",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS casino_tax_rate NUMERIC(5,2) NOT NULL DEFAULT 25.0",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS casino_cooldown INT NOT NULL DEFAULT 5",
+    "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS casino_house_pot NUMERIC(18,2) NOT NULL DEFAULT 0",
+    "ALTER TABLE wallets ADD COLUMN IF NOT EXISTS chips NUMERIC(18,2) NOT NULL DEFAULT 0",
+    """CREATE TABLE IF NOT EXISTS casino_cooldowns (
+        guild_id    BIGINT NOT NULL,
+        user_id     BIGINT NOT NULL,
+        last_played TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (guild_id, user_id)
+    )""",
     "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS tax_rate_work NUMERIC(5,2) NOT NULL DEFAULT 10.0",
     "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS tax_rate_salary NUMERIC(5,2) NOT NULL DEFAULT 15.0",
     "ALTER TABLE guilds ADD COLUMN IF NOT EXISTS tax_rate_stock_profit NUMERIC(5,2) NOT NULL DEFAULT 20.0",
