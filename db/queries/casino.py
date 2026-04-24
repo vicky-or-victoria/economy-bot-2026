@@ -362,16 +362,52 @@ class DiceView(discord.ui.View):
         self.resolved = True
         for item in self.children:
             item.disabled = True
+
         roll   = random.randint(1, 6)
-        # Over = 4,5,6 | Under = 1,2,3
-        won    = (choice == "over" and roll >= 4) or (choice == "under" and roll <= 3)
         payout = self.bet * 1.8
+        choice_label = "Over 3" if choice == "over" else "Under 4"
+        die_faces    = ["⚀","⚁","⚂","⚃","⚄","⚅"]
+
+        # ── Rolling animation ────────────────────────────────────────────────
+        rolling_embed = neutral_embed(
+            "🎲 Dice — Rolling...",
+            f"You called **{choice_label}**\n\n"
+            f"🎲  *The die tumbles across the felt...*  🎲\n\n"
+            f"Bet: **{self.bet:,.2f}** chips"
+        )
+        await interaction.response.edit_message(embed=rolling_embed, view=self)
+        message = await interaction.original_response()
+
+        roll_frames = [
+            ("*rattling...*",  die_faces[random.randint(0,5)]),
+            ("*bouncing...*",  die_faces[random.randint(0,5)]),
+            ("*slowing...*",   die_faces[random.randint(0,5)]),
+            ("*settling...*",  die_faces[roll - 1]),
+        ]
+        for label, face in roll_frames:
+            await asyncio.sleep(0.35)
+            e = neutral_embed(
+                "🎲 Dice — Rolling...",
+                f"You called **{choice_label}**\n\n"
+                f"# {face}\n{label}\n\n"
+                f"Bet: **{self.bet:,.2f}** chips"
+            )
+            try:
+                await message.edit(embed=e, view=self)
+            except Exception:
+                break
+
+        await asyncio.sleep(0.4)
+
+        # ── Result ───────────────────────────────────────────────────────────
+        won = (choice == "over" and roll >= 4) or (choice == "under" and roll <= 3)
         if won:
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, payout)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                f"Dice — Rolled {roll}! You Win!",
-                f"You called **{'Over 3' if choice == 'over' else 'Under 4'}** and rolled a **{roll}**! 🎲\n\n"
+                f"🎲 Dice — Rolled {roll}! You Win!",
+                f"# {die_faces[roll-1]}\n"
+                f"You called **{choice_label}** and rolled a **{roll}**! ✅\n\n"
                 f"**Gross Win:** {payout:,.2f} chips\n"
                 f"**Tax:** {tax:,.2f} chips\n"
                 f"**Net Win:** {net:,.2f} chips\n"
@@ -381,12 +417,16 @@ class DiceView(discord.ui.View):
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                f"Dice — Rolled {roll}",
-                f"You called **{'Over 3' if choice == 'over' else 'Under 4'}** but rolled a **{roll}**.\n\n"
+                f"🎲 Dice — Rolled {roll}",
+                f"# {die_faces[roll-1]}\n"
+                f"You called **{choice_label}** but rolled a **{roll}**. ❌\n\n"
                 f"**Lost:** {self.bet:,.2f} chips\n"
                 f"**New Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            await message.edit(embed=embed, view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="⬆️ Over 3", style=discord.ButtonStyle.primary)
     async def over(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -429,48 +469,82 @@ class HiLoView(discord.ui.View):
         if nxt_val == cur_val:
             won = False
 
+        # ── Card draw animation ──────────────────────────────────────────────
+        arrow = "⬆️" if choice == "higher" else "⬇️"
+        draw_embed = neutral_embed(
+            "🃏 Hi-Lo — Drawing...",
+            f"Current card: **{self.current_card}**  |  You called **{choice}** {arrow}\n\n"
+            f"🂠  *Drawing the next card...*\n\n"
+            f"Chain: **{self.chain}/5**  |  Multiplier: **{self.multiplier:.2f}x**"
+        )
+        await interaction.response.edit_message(embed=draw_embed, view=self)
+        message = await interaction.original_response()
+
+        for _ in range(2):
+            await asyncio.sleep(0.4)
+            e = neutral_embed(
+                "🃏 Hi-Lo — Drawing...",
+                f"Current card: **{self.current_card}**  |  You called **{choice}** {arrow}\n\n"
+                f"🂠  *...*\n\n"
+                f"Chain: **{self.chain}/5**  |  Multiplier: **{self.multiplier:.2f}x**"
+            )
+            try:
+                await message.edit(embed=e, view=self)
+            except Exception:
+                break
+        await asyncio.sleep(0.35)
+
+        # ── Result ───────────────────────────────────────────────────────────
         if not won:
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
+            outcome = "tied — ties lose" if nxt_val == cur_val else f"you called {choice}"
             embed = lose_embed(
-                f"Hi-Lo — {next_card}",
-                f"Card was **{next_card}** (you called {'higher' if choice == 'higher' else 'lower'} from **{self.current_card}**).\n\n"
+                f"🃏 Hi-Lo — {next_card}  ❌",
+                f"**{self.current_card}** → **{next_card}**  ({outcome})\n\n"
                 f"**Lost:** {self.bet:,.2f} chips\n"
                 f"**New Balance:** {chips:,.2f} chips"
             )
-            await interaction.response.edit_message(embed=embed, view=self)
+            try:
+                await message.edit(embed=embed, view=self)
+            except Exception:
+                pass
             return
 
         new_multiplier = round(self.multiplier * 1.9, 4)
         new_chain      = self.chain + 1
 
         if new_chain >= 5:
-            # Max chain reached — auto cash out
             gross = round(self.bet * new_multiplier, 2)
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, gross)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                f"Hi-Lo — Max Chain! 🔥",
-                f"Card was **{next_card}** — correct! You've hit the 5-chain limit!\n\n"
+                f"🃏 Hi-Lo — Max Chain! 🔥",
+                f"**{self.current_card}** → **{next_card}** ✅  Max chain reached!\n\n"
                 f"**Multiplier:** {new_multiplier:.2f}x\n"
                 f"**Gross Win:** {gross:,.2f} chips\n"
                 f"**Tax:** {tax:,.2f} chips\n"
                 f"**Net Win:** {net:,.2f} chips\n"
                 f"**New Balance:** {chips:,.2f} chips"
             )
-            await interaction.response.edit_message(embed=embed, view=self)
+            try:
+                await message.edit(embed=embed, view=self)
+            except Exception:
+                pass
         else:
-            # Offer to continue or cash out
             gross_if_cashout = round(self.bet * new_multiplier, 2)
             embed = neutral_embed(
-                f"Hi-Lo — {next_card} ✅ (Chain {new_chain}/5)",
-                f"Card was **{next_card}** — correct!\n\n"
+                f"🃏 Hi-Lo — {next_card} ✅  (Chain {new_chain}/5)",
+                f"**{self.current_card}** → **{next_card}** — correct!\n\n"
                 f"**Current Multiplier:** {new_multiplier:.2f}x\n"
                 f"**Cash Out Now:** ~{gross_if_cashout:,.2f} chips (before tax)\n\n"
                 f"Keep going or take your winnings?"
             )
             view = HiLoActiveView(self.bet, self.settings, next_card, new_chain, new_multiplier)
-            await interaction.response.edit_message(embed=embed, view=view)
+            try:
+                await message.edit(embed=embed, view=view)
+            except Exception:
+                pass
 
 
 class HiLoActiveView(discord.ui.View):
@@ -548,15 +622,48 @@ class KenoModal(discord.ui.Modal, title="Keno — Pick Your Numbers"):
         drawn   = sorted(random.sample(range(1, 41), 20))
         matches = [n for n in picks if n in drawn]
         payout  = self.bet * KENO_PAYOUTS.get(len(matches), 0)
+        picks_str = " ".join(str(p) for p in sorted(picks))
 
-        drawn_str   = " ".join(f"**{n}**" if n in picks else str(n) for n in drawn)
-        picks_str   = " ".join(str(p) for p in sorted(picks))
+        # ── Progressive draw animation ───────────────────────────────────────
+        # Reveal drawn balls in 4 waves (~5 per wave), highlighting picks as they hit
+        loading_embed = neutral_embed(
+            "🎱 Keno — Drawing Balls...",
+            f"**Your Numbers:** {picks_str}\n\n"
+            f"🎱  *The draw machine is spinning...*\n\n"
+            f"Bet: **{self.bet:,.2f}** chips"
+        )
+        await interaction.response.send_message(embed=loading_embed)
+        message = await interaction.original_response()
 
+        revealed_so_far: list[int] = []
+        waves = [drawn[i:i+5] for i in range(0, len(drawn), 5)]  # 4 waves of 5
+        for wave in waves:
+            await asyncio.sleep(0.55)
+            revealed_so_far.extend(wave)
+            hits_so_far = [n for n in picks if n in revealed_so_far]
+            drawn_str_partial = " ".join(
+                f"**{n}**" if n in picks else str(n) for n in revealed_so_far
+            )
+            e = neutral_embed(
+                f"🎱 Keno — Drawing... ({len(revealed_so_far)}/20)",
+                f"**Your Numbers:** {picks_str}\n\n"
+                f"**Drawn so far:** {drawn_str_partial}\n\n"
+                f"**Hits so far:** {len(hits_so_far)} / {len(picks)}"
+            )
+            try:
+                await message.edit(embed=e)
+            except Exception:
+                break
+
+        await asyncio.sleep(0.4)
+
+        # ── Final result ─────────────────────────────────────────────────────
+        drawn_str = " ".join(f"**{n}**" if n in picks else str(n) for n in drawn)
         if payout > 0:
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, payout)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                f"Keno — {len(matches)} Match{'es' if len(matches) != 1 else ''}!",
+                f"🎱 Keno — {len(matches)} Match{'es' if len(matches) != 1 else ''}!",
                 f"**Your Numbers:** {picks_str}\n"
                 f"**Drawn:** {drawn_str}\n\n"
                 f"**Matches:** {len(matches)}  |  **Multiplier:** {KENO_PAYOUTS[len(matches)]}x\n"
@@ -569,14 +676,17 @@ class KenoModal(discord.ui.Modal, title="Keno — Pick Your Numbers"):
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                f"Keno — {len(matches)} Match{'es' if len(matches) != 1 else ''}",
+                f"🎱 Keno — {len(matches)} Match{'es' if len(matches) != 1 else ''}",
                 f"**Your Numbers:** {picks_str}\n"
                 f"**Drawn:** {drawn_str}\n\n"
                 f"**Matches:** {len(matches)}\n"
                 f"**Lost:** {self.bet:,.2f} chips\n"
                 f"**New Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.send_message(embed=embed)
+        try:
+            await message.edit(embed=embed)
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -659,12 +769,35 @@ class BlackjackView(discord.ui.View):
         )
 
     async def finish(self, interaction: discord.Interaction):
-        """Dealer draws, determine winner."""
+        """Dealer draws with animation, then determine winner."""
         for item in self.children:
             item.disabled = True
 
+        # ── Dealer draw animation ────────────────────────────────────────────
+        dealing_embed = neutral_embed(
+            "🃏 Blackjack — Dealer's Turn",
+            f"**Your Hand:** {bj_hand_str(self.player)} = **{bj_value(self.player)}**\n"
+            f"**Dealer reveals:** {self.dealer[0]}  🂠  *flipping hidden card...*\n\n"
+            f"Bet: **{self.bet:,.2f}** chips"
+        )
+        await interaction.response.edit_message(embed=dealing_embed, view=self)
+        message = await interaction.original_response()
+        await asyncio.sleep(0.55)
+
+        # Dealer draws cards one at a time
         while bj_value(self.dealer) < 17:
             self.dealer.append(self.deck.pop())
+            e = neutral_embed(
+                "🃏 Blackjack — Dealer Drawing...",
+                f"**Your Hand:** {bj_hand_str(self.player)} = **{bj_value(self.player)}**\n"
+                f"**Dealer:** {bj_hand_str(self.dealer)} = **{bj_value(self.dealer)}**\n\n"
+                f"*{'Dealer must hit...' if bj_value(self.dealer) < 17 else 'Dealer stands.'}*"
+            )
+            try:
+                await message.edit(embed=e, view=self)
+            except Exception:
+                break
+            await asyncio.sleep(0.5)
 
         pv = bj_value(self.player)
         dv = bj_value(self.dealer)
@@ -674,7 +807,7 @@ class BlackjackView(discord.ui.View):
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                "Blackjack — Bust!",
+                "🃏 Blackjack — Bust!",
                 f"**Your Hand:** {bj_hand_str(self.player)} = {pv} (BUST)\n"
                 f"**Dealer:** {bj_hand_str(self.dealer)} = {dv}\n\n"
                 f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
@@ -684,7 +817,7 @@ class BlackjackView(discord.ui.View):
             gross = self.bet * mult
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, gross)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
-            label    = "Blackjack — Natural 21! 🎉" if mult == 2.5 else "Blackjack — You Win!"
+            label    = "🃏 Blackjack — Natural 21! 🎉" if mult == 2.5 else "🃏 Blackjack — You Win!"
             embed = win_embed(
                 label,
                 f"**Your Hand:** {bj_hand_str(self.player)} = {pv}\n"
@@ -697,7 +830,7 @@ class BlackjackView(discord.ui.View):
             await stamp_cooldown(interaction.guild_id, interaction.user.id)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = neutral_embed(
-                "Blackjack — Push",
+                "🃏 Blackjack — Push",
                 f"**Your Hand:** {bj_hand_str(self.player)} = {pv}\n"
                 f"**Dealer:** {bj_hand_str(self.dealer)} = {dv}\n\n"
                 "It's a tie — your bet has been returned.\n"
@@ -707,12 +840,15 @@ class BlackjackView(discord.ui.View):
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                "Blackjack — Dealer Wins",
+                "🃏 Blackjack — Dealer Wins",
                 f"**Your Hand:** {bj_hand_str(self.player)} = {pv}\n"
                 f"**Dealer:** {bj_hand_str(self.dealer)} = {dv}\n\n"
                 f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            await message.edit(embed=embed, view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="👊 Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -793,6 +929,34 @@ class BaccaratView(discord.ui.View):
         else:
             winner = "tie"
 
+        # ── Dealing animation ────────────────────────────────────────────────
+        choice_labels = {"player": "👤 Player", "banker": "🏦 Banker", "tie": "🤝 Tie"}
+        deal_embed = neutral_embed(
+            "🎴 Baccarat — Dealing...",
+            f"You bet on **{choice_labels[choice]}**\n\n"
+            f"**Player:** 🂠  🂠\n"
+            f"**Banker:** 🂠  🂠\n\n"
+            f"*Cards are being dealt...*"
+        )
+        await interaction.response.edit_message(embed=deal_embed, view=self)
+        message = await interaction.original_response()
+
+        await asyncio.sleep(0.5)
+        # Reveal player hand
+        e = neutral_embed(
+            "🎴 Baccarat — Revealing...",
+            f"You bet on **{choice_labels[choice]}**\n\n"
+            f"**Player:** {bj_hand_str(player[:2])}  *(= {bac_value(player[:2])})*\n"
+            f"**Banker:** 🂠  🂠\n\n"
+            f"*Flipping banker cards...*"
+        )
+        try:
+            await message.edit(embed=e, view=self)
+        except Exception:
+            pass
+        await asyncio.sleep(0.6)
+
+        # ── Final result ─────────────────────────────────────────────────────
         if choice == winner:
             if choice == "tie":
                 payout = self.bet * 8
@@ -803,9 +967,10 @@ class BaccaratView(discord.ui.View):
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, payout)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                f"Baccarat — {winner.title()} Wins! 🎉",
-                f"**Player:** {bj_hand_str(player)} = {pv}\n"
-                f"**Banker:** {bj_hand_str(banker)} = {bv}\n\n"
+                f"🎴 Baccarat — {winner.title()} Wins! 🎉",
+                f"**Player:** {bj_hand_str(player)} = **{pv}**\n"
+                f"**Banker:** {bj_hand_str(banker)} = **{bv}**\n\n"
+                f"Your bet: **{choice_labels[choice]}** ✅\n\n"
                 f"**Gross Win:** {payout:,.2f} chips\n"
                 f"**Tax:** {tax:,.2f} chips\n"
                 f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
@@ -814,13 +979,16 @@ class BaccaratView(discord.ui.View):
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                f"Baccarat — {winner.title()} Wins",
-                f"**Player:** {bj_hand_str(player)} = {pv}\n"
-                f"**Banker:** {bj_hand_str(banker)} = {bv}\n\n"
-                f"You called **{choice}**.\n"
+                f"🎴 Baccarat — {winner.title()} Wins",
+                f"**Player:** {bj_hand_str(player)} = **{pv}**\n"
+                f"**Banker:** {bj_hand_str(banker)} = **{bv}**\n\n"
+                f"Your bet: **{choice_labels[choice]}** ❌\n\n"
                 f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            await message.edit(embed=embed, view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="👤 Player", style=discord.ButtonStyle.primary)
     async def player_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -876,28 +1044,57 @@ class ThreeCardPokerView(discord.ui.View):
             item.disabled = True
         pr, pv = tcp_rank(self.player_hand)
         dr, dv = tcp_rank(self.dealer_hand)
-
         player_wins = pr > dr or (pr == dr and pv > dv)
         ph_str = bj_hand_str(self.player_hand)
         dh_str = bj_hand_str(self.dealer_hand)
+        ranks  = ["", "High Card", "Pair", "Straight", "Three of a Kind"]
 
         if action == "fold":
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                "Three Card Poker — Folded",
+                "🃏 Three Card Poker — Folded",
                 f"**Your Hand:** {ph_str}\n"
                 f"**Dealer:** {dh_str}\n\n"
                 f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
-        elif player_wins:
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        # ── Dealer reveal animation ──────────────────────────────────────────
+        reveal_embed = neutral_embed(
+            "🃏 Three Card Poker — Revealing...",
+            f"**Your Hand:** {ph_str} ({ranks[pr]})\n"
+            f"**Dealer:** 🂠  🂠  🂠\n\n"
+            f"*The dealer flips their cards...*"
+        )
+        await interaction.response.edit_message(embed=reveal_embed, view=self)
+        message = await interaction.original_response()
+        await asyncio.sleep(0.7)
+
+        # Show cards one at a time
+        for i in range(1, len(self.dealer_hand) + 1):
+            partial = bj_hand_str(self.dealer_hand[:i]) + ("  🂠" * (len(self.dealer_hand) - i))
+            e = neutral_embed(
+                "🃏 Three Card Poker — Revealing...",
+                f"**Your Hand:** {ph_str} ({ranks[pr]})\n"
+                f"**Dealer:** {partial}\n\n"
+                f"*Flipping...*"
+            )
+            try:
+                await message.edit(embed=e, view=self)
+            except Exception:
+                break
+            await asyncio.sleep(0.45)
+
+        # ── Final result ─────────────────────────────────────────────────────
+        if player_wins:
             mult   = TCP_PAYOUTS.get(pr, 2.0)
             payout = self.bet * mult
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, payout)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
-            ranks    = ["", "High Card", "Pair", "Straight", "Three of a Kind"]
             embed = win_embed(
-                f"Three Card Poker — {ranks[pr]}!",
+                f"🃏 Three Card Poker — {ranks[pr]}!",
                 f"**Your Hand:** {ph_str} ({ranks[pr]})\n"
                 f"**Dealer:** {dh_str} ({ranks[dr]})\n\n"
                 f"**Multiplier:** {mult}x\n"
@@ -908,14 +1105,16 @@ class ThreeCardPokerView(discord.ui.View):
         else:
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
-            ranks = ["", "High Card", "Pair", "Straight", "Three of a Kind"]
             embed = lose_embed(
-                "Three Card Poker — Dealer Wins",
+                "🃏 Three Card Poker — Dealer Wins",
                 f"**Your Hand:** {ph_str} ({ranks[pr]})\n"
                 f"**Dealer:** {dh_str} ({ranks[dr]})\n\n"
                 f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            await message.edit(embed=embed, view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="✅ Play", style=discord.ButtonStyle.success)
     async def play_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -953,13 +1152,43 @@ class PickNumberView(discord.ui.View):
             for item in self.children:
                 item.disabled = True
             house = random.randint(1, 10)
+
+            # ── Drum roll animation ──────────────────────────────────────────
+            drumroll_embed = neutral_embed(
+                "🎯 Pick a Number — Drawing...",
+                f"You picked **{number}**\n\n"
+                f"🥁  *The house draws a number...*  🥁\n\n"
+                f"Bet: **{self.bet:,.2f}** chips"
+            )
+            await interaction.response.edit_message(embed=drumroll_embed, view=self)
+            message = await interaction.original_response()
+
+            # Flash random numbers before settling
+            flash_seq = [random.randint(1, 10) for _ in range(5)] + [house]
+            delays    = [0.2, 0.2, 0.25, 0.3, 0.35, 0.5]
+            for n, d in zip(flash_seq, delays):
+                await asyncio.sleep(d)
+                e = neutral_embed(
+                    "🎯 Pick a Number — Drawing...",
+                    f"You picked **{number}**\n\n"
+                    f"# {n}\n*{'settling...' if n == house else 'drawing...'}*\n\n"
+                    f"Bet: **{self.bet:,.2f}** chips"
+                )
+                try:
+                    await message.edit(embed=e, view=self)
+                except Exception:
+                    break
+
+            await asyncio.sleep(0.35)
+
+            # ── Result ───────────────────────────────────────────────────────
             if number == house:
                 gross    = self.bet * 8
                 net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, gross)
                 chips    = await get_chips(interaction.guild_id, interaction.user.id)
                 embed = win_embed(
-                    "Pick a Number — Exact Match! 🎯",
-                    f"You picked **{number}**, house drew **{house}**!\n\n"
+                    "🎯 Pick a Number — Exact Match! 🎯",
+                    f"You picked **{number}**, house drew **{house}**! ✅\n\n"
                     f"**Gross Win:** {gross:,.2f} chips\n"
                     f"**Tax:** {tax:,.2f} chips\n"
                     f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
@@ -968,11 +1197,14 @@ class PickNumberView(discord.ui.View):
                 await apply_loss(interaction, self.bet)
                 chips = await get_chips(interaction.guild_id, interaction.user.id)
                 embed = lose_embed(
-                    "Pick a Number — No Match",
-                    f"You picked **{number}**, house drew **{house}**.\n\n"
+                    "🎯 Pick a Number — No Match",
+                    f"You picked **{number}**, house drew **{house}**. ❌\n\n"
                     f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
                 )
-            await interaction.response.edit_message(embed=embed, view=self)
+            try:
+                await message.edit(embed=embed, view=self)
+            except Exception:
+                pass
         return callback
 
 
@@ -1290,41 +1522,67 @@ class WarView(discord.ui.View):
             net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, gross)
             chips    = await get_chips(interaction.guild_id, interaction.user.id)
             embed = win_embed(
-                "War — You Win!",
+                "⚔️ War — You Win!",
                 f"**Your Card:** {self.player_card}  vs  **Dealer:** {self.dealer_card}\n\n"
                 f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
+            await interaction.response.edit_message(embed=embed, view=self)
         elif pv < dv:
             await apply_loss(interaction, self.bet)
             chips = await get_chips(interaction.guild_id, interaction.user.id)
             embed = lose_embed(
-                "War — Dealer Wins",
+                "⚔️ War — Dealer Wins",
                 f"**Your Card:** {self.player_card}  vs  **Dealer:** {self.dealer_card}\n\n"
                 f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
             )
+            await interaction.response.edit_message(embed=embed, view=self)
         else:
-            # Tie — go to war
+            # Tie
             if not go_to_war:
                 await apply_loss(interaction, self.bet)
                 chips = await get_chips(interaction.guild_id, interaction.user.id)
                 embed = lose_embed(
-                    "War — Surrender",
+                    "🏳️ War — Surrender",
                     f"Both drew **{self.player_card}**. You surrendered.\n\n"
                     f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
                 )
+                await interaction.response.edit_message(embed=embed, view=self)
             else:
-                # Each draws again
+                # ── War battle animation ─────────────────────────────────────
+                battle_embed = neutral_embed(
+                    "⚔️ War — Battle Begins!",
+                    f"Both drew **{self.player_card}** — WAR IS DECLARED!\n\n"
+                    f"🂠  *Both players draw their battle cards...*  🂠\n\n"
+                    f"Double or nothing — **{self.bet * 2:,.2f}** chips on the line!"
+                )
+                await interaction.response.edit_message(embed=battle_embed, view=self)
+                message = await interaction.original_response()
+                await asyncio.sleep(0.6)
+
                 deck  = DECK.copy()
                 random.shuffle(deck)
                 pc2, dc2 = deck.pop(), deck.pop()
                 pv2, dv2 = CARD_VALUES[pc2], CARD_VALUES[dc2]
+
+                reveal_embed = neutral_embed(
+                    "⚔️ War — Revealing Battle Cards...",
+                    f"**Your Battle Card:** **{pc2}**\n"
+                    f"**Dealer Battle Card:** 🂠\n\n"
+                    f"*Dealer flips...*"
+                )
+                try:
+                    await message.edit(embed=reveal_embed, view=self)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.6)
+
                 if pv2 >= dv2:
                     gross    = self.bet * 4
                     net, tax = await apply_tax_and_pay(interaction, self.settings, self.bet, gross)
                     chips    = await get_chips(interaction.guild_id, interaction.user.id)
                     embed = win_embed(
-                        "War — Victory in Battle! ⚔️",
-                        f"**War Cards:** {pc2} vs {dc2}\n\n"
+                        "⚔️ War — Victory in Battle! 🏆",
+                        f"**Your Battle Card:** {pc2}  vs  **Dealer:** {dc2}\n\n"
                         f"**Gross Win:** {gross:,.2f} chips\n"
                         f"**Tax:** {tax:,.2f} chips\n"
                         f"**Net Win:** {net:,.2f} chips | **Balance:** {chips:,.2f} chips"
@@ -1333,11 +1591,14 @@ class WarView(discord.ui.View):
                     await apply_loss(interaction, self.bet)
                     chips = await get_chips(interaction.guild_id, interaction.user.id)
                     embed = lose_embed(
-                        "War — Defeated in Battle ⚔️",
-                        f"**War Cards:** {pc2} vs {dc2}\n\n"
+                        "⚔️ War — Defeated in Battle",
+                        f"**Your Battle Card:** {pc2}  vs  **Dealer:** {dc2}\n\n"
                         f"**Lost:** {self.bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
                     )
-        await interaction.response.edit_message(embed=embed, view=self)
+                try:
+                    await message.edit(embed=embed, view=self)
+                except Exception:
+                    pass
 
     @discord.ui.button(label="⚔️ Go to War", style=discord.ButtonStyle.danger)
     async def war(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1641,9 +1902,43 @@ class Casino(commands.Cog):
         random.shuffle(deck)
         player = [deck.pop(), deck.pop()]
         dealer = [deck.pop(), deck.pop()]
-        view   = BlackjackView(bet, settings, player, dealer, deck)
-        embed  = view.build_embed()
-        await interaction.response.send_message(embed=embed, view=view)
+
+        # ── Dealing animation ────────────────────────────────────────────────
+        deal_embed = neutral_embed(
+            "🃏 Blackjack — Dealing...",
+            f"**Your Hand:** 🂠\n"
+            f"**Dealer Shows:** 🂠\n\n"
+            f"Bet: **{bet:,.2f}** chips\n*Shuffling and dealing...*"
+        )
+        await interaction.response.send_message(embed=deal_embed)
+        message = await interaction.original_response()
+
+        deal_stages = [
+            (f"🂠  🂠", "🂠",         "*Dealing...*"),
+            (f"{player[0]}  🂠",  "🂠",         "*Dealing...*"),
+            (f"{player[0]}  🂠",  f"{dealer[0]}", "*Dealer's card...*"),
+            (f"{player[0]}  {player[1]}", f"{dealer[0]}", "*Your second card...*"),
+        ]
+        for ph, dh, lbl in deal_stages:
+            await asyncio.sleep(0.3)
+            e = neutral_embed(
+                "🃏 Blackjack — Dealing...",
+                f"**Your Hand:** {ph}\n"
+                f"**Dealer Shows:** {dh}  +  🂠\n\n"
+                f"Bet: **{bet:,.2f}** chips\n*{lbl}*"
+            )
+            try:
+                await message.edit(embed=e)
+            except Exception:
+                break
+
+        await asyncio.sleep(0.3)
+        view  = BlackjackView(bet, settings, player, dealer, deck)
+        embed = view.build_embed()
+        try:
+            await message.edit(embed=embed, view=view)
+        except Exception:
+            pass
 
     @app_commands.command(name="baccarat", description="Baccarat — bet on Player, Banker, or Tie.")
     async def baccarat(self, interaction: discord.Interaction, bet: float):
@@ -1807,8 +2102,33 @@ class Casino(commands.Cog):
         random.shuffle(deck)
         pc, dc = deck.pop(), deck.pop()
         pv, dv = CARD_VALUES[pc], CARD_VALUES[dc]
+
+        # ── Draw animation ───────────────────────────────────────────────────
+        draw_embed = neutral_embed(
+            "🃏 War — Drawing Cards...",
+            f"{interaction.user.mention}\n\n"
+            f"**Your Card:** 🂠\n"
+            f"**Dealer:** 🂠\n\n"
+            f"Bet: **{bet:,.2f}** chips\n*Both players draw...*"
+        )
+        await interaction.response.send_message(embed=draw_embed)
+        message = await interaction.original_response()
+
+        await asyncio.sleep(0.5)
+        e = neutral_embed(
+            "🃏 War — Revealing...",
+            f"{interaction.user.mention}\n\n"
+            f"**Your Card:** **{pc}**\n"
+            f"**Dealer:** 🂠\n\n"
+            f"*Dealer flips...*"
+        )
+        try:
+            await message.edit(embed=e)
+        except Exception:
+            pass
+        await asyncio.sleep(0.55)
+
         if pv != dv:
-            # Immediate resolution — no tie
             won = pv > dv
             if won:
                 gross    = bet * 2
@@ -1829,14 +2149,20 @@ class Casino(commands.Cog):
                     f"**Your Card:** {pc}  vs  **Dealer:** {dc}\n\n"
                     f"**Lost:** {bet:,.2f} chips | **Balance:** {chips:,.2f} chips"
                 )
-            await interaction.response.send_message(embed=embed)
+            try:
+                await message.edit(embed=embed)
+            except Exception:
+                pass
         else:
             embed = neutral_embed(
                 "🃏 War — It's a Tie! ⚔️",
                 f"{interaction.user.mention}\n\n"
                 f"Both drew **{pc}**! You may go to **War** (double or bust) or **Surrender**."
             )
-            await interaction.response.send_message(embed=embed, view=WarView(bet, settings, pc, dc))
+            try:
+                await message.edit(embed=embed, view=WarView(bet, settings, pc, dc))
+            except Exception:
+                pass
 
     @app_commands.command(name="crash", description="Ride the multiplier — cash out before it crashes!")
     async def crash(self, interaction: discord.Interaction, bet: float):
@@ -1857,7 +2183,31 @@ class Casino(commands.Cog):
             await interaction.response.send_message(embed=embed)
             return
 
-        # Post the live embed and start the climb
+        # ── Launch countdown ─────────────────────────────────────────────────
+        countdown_embed = neutral_embed(
+            "💥 Crash — Launching...",
+            f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n"
+            f"🚀  **3...**\n\n"
+            "Cash out before the crash!"
+        )
+        await interaction.response.send_message(embed=countdown_embed)
+        message = await interaction.original_response()
+
+        for count, label in [("2...", "🚀"), ("1...", "🔥"), ("🚀 LAUNCH!", "💥")]:
+            await asyncio.sleep(0.6)
+            e = neutral_embed(
+                "💥 Crash — Launching...",
+                f"{interaction.user.mention} bet **{bet:,.2f}** chips.\n\n"
+                f"{label}  **{count}**\n\n"
+                "Cash out before the crash!"
+            )
+            try:
+                await message.edit(embed=e)
+            except Exception:
+                break
+        await asyncio.sleep(0.4)
+
+        # Post the live embed with button and start the climb
         view  = CrashView(bet, settings, crash_point, current=1.0)
         embed = neutral_embed(
             "💥 Crash — In Progress",
@@ -1865,8 +2215,10 @@ class Casino(commands.Cog):
             f"**Multiplier:** 1.00x ⬆️\n\n"
             "Cash out before the crash!"
         )
-        await interaction.response.send_message(embed=embed, view=view)
-        message = await interaction.original_response()
+        try:
+            await message.edit(embed=embed, view=view)
+        except Exception:
+            pass
 
         # Climb loop
         current = 1.0
